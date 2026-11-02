@@ -19,6 +19,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .client import OpenHopClient, OpenHopError
 from .config import Config, ConfigError, load_config
+from .history import HistoryError, RepeaterHistory
 from .security import GateMiddleware, current_auth
 
 INSTRUCTIONS = """\
@@ -26,8 +27,13 @@ This server exposes telemetry from an openHop Repeater (MeshCore mesh node).
 
 Tools are read-only by default. They return JSON derived from the Repeater's
 REST API. Prefer `openhop_stats` first for an overview; drill into neighbours,
-packets, noise floor, GPS, hardware, logs, processes, MQTT, or web frontends as
-needed.
+packets, noise floor, GPS, hardware, logs, processes, MQTT, web frontends,
+setup metadata, or room messages as needed.
+
+Channel conversation history is NOT in the REST API. It is read directly from
+the Repeater's SQLite database and decrypted with channel keys. Those tools
+(`openhop_channels`, `openhop_channel_messages`) require the admin role and the
+`allow_message_history` setting.
 
 Transport keys and other credential material are never exposed, even through
 `openhop_api_read`.
@@ -120,9 +126,23 @@ def build_server(cfg: Config) -> MCPServer:
         title="openHop Repeater MCP",
         description="Authenticated telemetry access for an openHop Repeater.",
         instructions=INSTRUCTIONS,
-        version="0.4.0",
+        version="0.5.2",
     )
     api = OpenHopClient(cfg.openhop_base_url, cfg.openhop_api_key, cfg.request_timeout_seconds)
+    history: RepeaterHistory | None = None
+    if cfg.allow_message_history and cfg.repeater_db_path:
+        history = RepeaterHistory(cfg.repeater_db_path)
+
+    def _require_admin(operation: str) -> dict[str, Any] | None:
+        auth = current_auth.get()
+        if auth.get("role") != "admin":
+            return {
+                "error": "forbidden",
+                "reason": f"{operation} requires an admin-role token",
+                "role": auth.get("role"),
+                "name": auth.get("name"),
+            }
+        return None
 
     @server.tool()
     async def openhop_stats(summary: bool = True) -> dict[str, Any]:
@@ -338,6 +358,90 @@ def build_server(cfg: Config) -> MCPServer:
         }
 
     @server.tool()
+    async def openhop_setup_info() -> dict[str, Any]:
+        """Return setup/hardware metadata: radio presets, serial ports, site info, hardware options."""
+        out: dict[str, Any] = {}
+        for key, path in (
+            ("radio_presets", "/api/radio_presets"),
+            ("serial_ports", "/api/serial_ports"),
+            ("site_info", "/api/site_info"),
+            ("hardware_options", "/api/hardware_options"),
+        ):
+            try:
+                out[key] = await api.get(path)
+            except OpenHopError as exc:
+                out[key] = _error(exc)
+        return out
+
+    @server.tool()
+    async def openhop_room_messages(
+        room_name: str | None = None,
+        room_hash: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return room-server messages. Requires room_name or room_hash.
+
+        Room servers only; channel chat lives in openhop_channel_messages.
+        """
+        if not room_name and not room_hash:
+            return {"error": "provide room_name or room_hash"}
+        params: dict[str, Any] = {"limit": max(1, min(limit, cfg.max_items))}
+        if room_name:
+            params["room_name"] = room_name
+        if room_hash:
+            params["room_hash"] = room_hash
+        try:
+            return await api.get("/api/room_messages", params)
+        except OpenHopError as exc:
+            return _error(exc)
+
+    @server.tool()
+    async def openhop_channels() -> dict[str, Any]:
+        """List configured mesh channels (names and indices only — never secrets)."""
+        if history is None:
+            return {
+                "error": "message history disabled",
+                "hint": "set allow_message_history=true and repeater_db_path in plugin config",
+            }
+        try:
+            return history.channels()
+        except HistoryError as exc:
+            return {"error": str(exc)}
+
+    @server.tool()
+    async def openhop_channel_messages(
+        channel: str | None = None,
+        days: float = 7.0,
+        limit: int = 100,
+        grep: str | None = None,
+        include_bogus_timestamps: bool = False,
+    ) -> dict[str, Any]:
+        """Decrypt and return channel message history from the Repeater database.
+
+        Admin token required — message content is more sensitive than telemetry.
+        Omit `channel` to search every configured channel. `days` is a rolling
+        window ending now. `grep` is a case-insensitive substring filter.
+        """
+        denied = _require_admin("openhop_channel_messages")
+        if denied:
+            return denied
+        if history is None:
+            return {
+                "error": "message history disabled",
+                "hint": "set allow_message_history=true and repeater_db_path in plugin config",
+            }
+        try:
+            return history.messages(
+                channel,
+                days=days,
+                limit=limit,
+                grep=grep,
+                include_bogus_timestamps=include_bogus_timestamps,
+            )
+        except HistoryError as exc:
+            return {"error": str(exc)}
+
+    @server.tool()
     async def openhop_whoami() -> dict[str, Any]:
         """Return the identity and role granted to the calling token."""
         return dict(current_auth.get())
@@ -376,17 +480,6 @@ def build_server(cfg: Config) -> MCPServer:
             return await api.get(path, params)
         except OpenHopError as exc:
             return _error(exc)
-
-    def _require_admin(operation: str) -> dict[str, Any] | None:
-        auth = current_auth.get()
-        if auth.get("role") != "admin":
-            return {
-                "error": "forbidden",
-                "reason": f"{operation} requires an admin-role token",
-                "role": auth.get("role"),
-                "name": auth.get("name"),
-            }
-        return None
 
     if not cfg.read_only:
         @server.tool()
@@ -481,6 +574,46 @@ def build_server(cfg: Config) -> MCPServer:
                 return {"error": f"unknown setting(s): {', '.join(unknown)}"}
             try:
                 return await api.post("/api/update_advert_rate_limit_config", settings)
+            except OpenHopError as exc:
+                return _error(exc)
+
+        @server.tool()
+        async def openhop_validate_config() -> dict[str, Any]:
+            """Validate the Repeater's current configuration. Admin token required."""
+            denied = _require_admin("openhop_validate_config")
+            if denied:
+                return denied
+            try:
+                # GET only — POST returns 405 on this route.
+                return await api.get("/api/validate_config")
+            except OpenHopError as exc:
+                return _error(exc)
+
+        @server.tool()
+        async def openhop_publish_neighbors() -> dict[str, Any]:
+            """Publish the current neighbour table. Admin token required."""
+            denied = _require_admin("openhop_publish_neighbors")
+            if denied:
+                return denied
+            try:
+                return await api.post("/api/publish_neighbors", {})
+            except OpenHopError as exc:
+                return _error(exc)
+
+        @server.tool()
+        async def openhop_query_neighbor_scopes(pubkey: str) -> dict[str, Any]:
+            """Ask one zero-hop neighbour for its region scopes. Admin token required.
+
+            `pubkey` must be a full 64-character public key.
+            """
+            denied = _require_admin("openhop_query_neighbor_scopes")
+            if denied:
+                return denied
+            key = (pubkey or "").strip()
+            if len(key) != 64:
+                return {"error": "pubkey must be a full 64-character public key"}
+            try:
+                return await api.post("/api/query_neighbor_scopes", {"pubkey": key})
             except OpenHopError as exc:
                 return _error(exc)
 

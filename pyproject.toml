@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhop-mcp-plugin"
-version = "0.4.0"
+version = "0.5.2"
 description = "Authenticated MCP server exposing openHop Repeater telemetry"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "mcp>=2.3,<3",
     "httpx2>=2.16",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

@@ -31,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_auth_failures": 10,
     "auth_failure_window_seconds": 300,
     "auth_lockout_seconds": 900,
+    "repeater_db_path": "/var/lib/openhop_repeater/repeater.db",
+    "allow_message_history": True,
 }
 
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -59,6 +61,8 @@ class Config:
     auth_lockout_seconds: float
     data_dir: Path = field(repr=False)
     token_file: Path = field(repr=False)
+    repeater_db_path: str = ""
+    allow_message_history: bool = True
 
 
 def _data_dir() -> Path:
@@ -256,6 +260,14 @@ def load_config() -> Config:
                 "Use specific IPs/CIDRs, or set allow_insecure_bind=true to acknowledge it."
             )
 
+    allow_message_history = raw.get("allow_message_history", True)
+    if not isinstance(allow_message_history, bool):
+        raise ConfigError("allow_message_history must be a boolean")
+
+    repeater_db_path = str(raw.get("repeater_db_path") or "").strip()
+    if repeater_db_path and not Path(repeater_db_path).is_absolute():
+        raise ConfigError("repeater_db_path must be an absolute path")
+
     auth_tokens = _parse_auth_tokens(raw, data_dir)
 
     return Config(
@@ -275,4 +287,6 @@ def load_config() -> Config:
         auth_lockout_seconds=auth_lockout_seconds,
         data_dir=data_dir,
         token_file=data_dir / "auth_token.txt",
+        repeater_db_path=repeater_db_path,
+        allow_message_history=allow_message_history,
     )

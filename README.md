@@ -78,6 +78,8 @@ from the manifest defaults. Edit it via the Repeater's Plugins page or
 | `max_auth_failures` | `10` | Failed auth attempts allowed per source IP within the window. |
 | `auth_failure_window_seconds` | `300` | Sliding window for counting failures. |
 | `auth_lockout_seconds` | `900` | Lockout duration once the failure limit is hit. |
+| `repeater_db_path` | `/var/lib/openhop_repeater/repeater.db` | Repeater SQLite database, read-only. |
+| `allow_message_history` | `true` | Register the channel-history tools. Content stays admin-only. |
 
 After changing config, restart the plugin (settings writes with `restart: true`
 do this automatically).
@@ -99,6 +101,10 @@ do this automatically).
 | `openhop_processes` | Host process CPU/memory usage. |
 | `openhop_mqtt_status` | MQTT bridge and per-broker connection state. |
 | `openhop_web_frontends` | Configured web frontends and selection. |
+| `openhop_setup_info` | Radio presets, serial ports, site info, hardware options. |
+| `openhop_room_messages` | Room-server messages (not channel chat). |
+| `openhop_channels` | Channel names and indices from the Repeater DB. No secrets. |
+| `openhop_channel_messages` | *Admin-only.* Decrypted channel history from the Repeater DB. |
 | `openhop_api_read` | Constrained GET against an allowlisted `/api/` path. |
 | `openhop_send_advert` | *Write, only when `read_only=false`.* |
 | `openhop_set_mode` | *Write, only when `read_only=false`.* |
@@ -126,36 +132,50 @@ Point an MCP client at `http://<host>:<port>/mcp` and send the bearer token in t
 }
 ```
 
-## Install locally
+## Install
+
+### Option 1 — GUI (recommended)
+
+1. Open the Repeater web UI and go to **Plugins**.
+2. Click **Install plugin** and choose the built wheel
+   (`openhop_mcp_plugin-<version>-py3-none-any.whl`).
+3. Open the plugin's settings, fill in `auth_tokens` and `allowed_ips`
+   (see [Configuration](#configuration)), then **Enable**.
+
+No shell access needed, and the plugin manager creates and owns its venv.
+
+### Option 2 — CLI / API
+
+Build the wheel first if you have not already:
 
 ```bash
 python -m build --wheel
-curl -X POST -H "X-API-Key: $OPENHOP_API_KEY" \
-  -F "wheel=@dist/openhop_mcp_plugin-0.1.0-py3-none-any.whl" \
+```
+
+Then upload it to the node and install by host path:
+
+```bash
+curl -X POST -H "X-API-Key: *** -H "Content-Type: application/json" \
+  -d '{"wheel_path":"/tmp/openhop_mcp_plugin-<version>-py3-none-any.whl"}' \
   http://127.0.0.1:8000/api/plugins/install
 ```
 
-Or with a host path:
+Enable and start:
 
 ```bash
-curl -X POST -H "X-API-Key: $OPENHOP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"wheel_path":"/tmp/openhop_mcp_plugin-0.1.0-py3-none-any.whl"}' \
-  http://127.0.0.1:8000/api/plugins/install
-```
-
-Then enable and start:
-
-```bash
-curl -X POST -H "X-API-Key: $OPENHOP_API_KEY" -H "Content-Type: application/json" \
+curl -X POST -H "X-API-Key: *** -H "Content-Type: application/json" \
   -d '{"id":"openhop.mcp"}' http://127.0.0.1:8000/api/plugins/enable
 ```
 
 Check logs:
 
 ```bash
-curl -H "X-API-Key: $OPENHOP_API_KEY" \
+curl -H "X-API-Key: *** \
   "http://127.0.0.1:8000/api/plugins/logs?id=openhop.mcp&tail=100"
 ```
+
+Installing a new wheel replaces the code but does **not** cycle the running
+process — disable then enable the plugin to load the new build.
 
 ## Development
 

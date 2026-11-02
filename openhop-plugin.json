@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "openhop.mcp",
   "name": "openHop MCP Server",
-  "version": "0.4.0",
+  "version": "0.5.2",
   "description": "Model Context Protocol server exposing openHop Repeater telemetry over authenticated, IP-whitelisted HTTP.",
   "runtime": {
     "type": "python",
@@ -22,7 +22,9 @@
       "allow_insecure_bind": false,
       "max_auth_failures": 10,
       "auth_failure_window_seconds": 300,
-      "auth_lockout_seconds": 900
+      "auth_lockout_seconds": 900,
+      "repeater_db_path": "/var/lib/openhop_repeater/repeater.db",
+      "allow_message_history": true
     }
   }
 }
