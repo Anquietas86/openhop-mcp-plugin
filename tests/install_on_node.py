@@ -66,7 +66,7 @@ def main() -> int:
                 "port": 8765,
                 "openhop_base_url": "http://127.0.0.1:8000",
                 "openhop_api_key": api_key,
-                "auth_token": "",
+                "auth_tokens": [],
                 "allowed_ips": [ip.strip() for ip in ALLOWED_IPS.split(",") if ip.strip()],
                 "read_only": True,
                 "request_timeout_seconds": 15,

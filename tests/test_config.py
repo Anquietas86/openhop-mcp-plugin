@@ -19,7 +19,7 @@ def _write(tmp_path, **overrides):
         "host": "127.0.0.1",
         "port": 8765,
         "openhop_base_url": "http://127.0.0.1:8000",
-        "auth_token": "test-token-abcdefghijklmnop",
+        "auth_tokens": [{"name": "test", "role": "admin", "token": "test-token-abcdefghijklmnop"}],
         "allowed_ips": ["127.0.0.1/32"],
         "read_only": True,
     }
@@ -71,18 +71,10 @@ def test_generated_token_is_stable_across_loads(tmp_path, monkeypatch):
     assert first == second
 
 
-def test_legacy_single_token_becomes_admin(tmp_path, monkeypatch):
-    cfg = _load(tmp_path, monkeypatch)
-    assert len(cfg.auth_tokens) == 1
-    assert cfg.auth_tokens[0].role == "admin"
-    assert cfg.auth_tokens[0].name == "legacy"
-
-
 def test_structured_tokens_parsed(tmp_path, monkeypatch):
     cfg = _load(
         tmp_path,
         monkeypatch,
-        auth_token="",
         auth_tokens=[
             {"name": "dashboard", "role": "read", "token": "read-token-abcdefghijklmnop"},
             {"name": "ops", "role": "admin", "token": "admin-token-abcdefghijklmnop"},
@@ -97,7 +89,6 @@ def test_bare_string_token_is_admin(tmp_path, monkeypatch):
     cfg = _load(
         tmp_path,
         monkeypatch,
-        auth_token="",
         auth_tokens=["plain-token-abcdefghijklmnop"],
     )
     assert len(cfg.auth_tokens) == 1
@@ -109,7 +100,6 @@ def test_duplicate_tokens_rejected(tmp_path, monkeypatch):
         _load(
             tmp_path,
             monkeypatch,
-            auth_token="",
             auth_tokens=[
                 {"name": "a", "role": "read", "token": "same-token-abcdefghijklmnop"},
                 {"name": "b", "role": "admin", "token": "same-token-abcdefghijklmnop"},
@@ -122,7 +112,6 @@ def test_invalid_role_rejected(tmp_path, monkeypatch):
         _load(
             tmp_path,
             monkeypatch,
-            auth_token="",
             auth_tokens=[
                 {"name": "a", "role": "owner", "token": "token-abcdefghijklmnop"},
             ],
@@ -131,7 +120,7 @@ def test_invalid_role_rejected(tmp_path, monkeypatch):
 
 def test_short_token_rejected(tmp_path, monkeypatch):
     with pytest.raises(ConfigError, match="too short"):
-        _load(tmp_path, monkeypatch, auth_token="short")
+        _load(tmp_path, monkeypatch, auth_tokens=[{"name": "a", "role": "admin", "token": "short"}])
 
 
 def test_rejects_non_loopback_bind_without_flag(tmp_path, monkeypatch):

@@ -92,7 +92,6 @@ def _write_config(data_dir: Path, **overrides) -> None:
         "port": PORT,
         "openhop_base_url": os.environ.get("OPENHOP_BASE_URL", "http://127.0.0.1:8000"),
         "openhop_api_key": key,
-        "auth_token": "",
         "auth_tokens": _auth_tokens(),
         "allowed_ips": ["127.0.0.1/32"],
         "read_only": True,

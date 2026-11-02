@@ -35,9 +35,8 @@ permission error without touching the Repeater API. Call `openhop_whoami` to see
 which identity and role a token has.
 
 The plugin stores token hashes nowhere; it compares against the configured
-values in constant time. Use `auth_tokens` for the multi-key form. The legacy
-single `auth_token` string still works and is treated as one `admin` token named
-`legacy`, so existing deployments upgrade without changes.
+values in constant time. Configure all credentials in the `auth_tokens` list;
+each entry takes a `name`, a `role` (`read` or `admin`), and a `token`.
 
 Additional guardrails:
 
@@ -70,7 +69,7 @@ from the manifest defaults. Edit it via the Repeater's Plugins page or
 | `port` | `8765` | MCP endpoint port. |
 | `openhop_base_url` | `http://127.0.0.1:8000` | Repeater REST API base URL. |
 | `openhop_api_key` | `""` | Repeater `X-API-Key`. Falls back to `OPENHOP_API_KEY` env var. |
-| `auth_token` | `""` | Bearer token clients must present. Empty = generated and persisted. |
+| `auth_tokens` | `[]` | List of `{name, role, token}` entries. Empty = one admin token generated and persisted. |
 | `allowed_ips` | `["127.0.0.1/32","::1/128"]` | CIDRs allowed to connect. |
 | `read_only` | `true` | When false, advert/mode tools are registered. |
 | `request_timeout_seconds` | `15` | Upstream request timeout. |
@@ -111,7 +110,7 @@ Point an MCP client at `http://<host>:<port>/mcp` and send the bearer token in t
     "openhop": {
       "type": "streamable-http",
       "url": "http://<repeater-host>:8765/mcp",
-      "headers": { "Authorization": "Bearer <token-from-auth_token.txt>" }
+      "headers": { "Authorization": "Bearer <token-from-auth_tokens>" }
     }
   }
 }

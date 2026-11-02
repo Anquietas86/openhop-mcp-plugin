@@ -23,7 +23,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "openhop_base_url": "http://127.0.0.1:8000",
     "openhop_api_key": "",
     "auth_tokens": [],
-    "auth_token": "",
     "allowed_ips": ["127.0.0.1/32", "::1/128"],
     "read_only": True,
     "request_timeout_seconds": 15,
@@ -146,8 +145,7 @@ def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry,
 
     * ``auth_tokens``: list of objects ``{"name", "role", "token"}`` or bare
       token strings (treated as admin).
-    * ``auth_token``: legacy single token string, treated as an admin entry.
-    * neither: generate a random admin token and persist it to ``auth_token.txt``.
+    * empty: generate a random admin token and persist it to ``auth_token.txt``.
     """
     entries_raw = raw.get("auth_tokens") or []
     if not isinstance(entries_raw, list):
@@ -167,10 +165,6 @@ def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry,
                 f"auth_tokens[{index - 1}] must be an object or string, "
                 f"got {type(item).__name__}"
             )
-
-    legacy = str(raw.get("auth_token") or "").strip()
-    if legacy and all(entry.token != legacy for entry in tokens):
-        tokens.append(_token_entry("legacy", "admin", legacy))
 
     if not tokens:
         generated = _load_or_create_token(data_dir, "")
