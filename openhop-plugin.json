@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "openhop.mcp",
   "name": "openHop MCP Server",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Model Context Protocol server exposing openHop Repeater telemetry over authenticated, IP-whitelisted HTTP.",
   "runtime": {
     "type": "python",

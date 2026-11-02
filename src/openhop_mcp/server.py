@@ -126,7 +126,7 @@ def build_server(cfg: Config) -> MCPServer:
         title="openHop Repeater MCP",
         description="Authenticated telemetry access for an openHop Repeater.",
         instructions=INSTRUCTIONS,
-        version="0.5.2",
+        version="0.5.3",
     )
     api = OpenHopClient(cfg.openhop_base_url, cfg.openhop_api_key, cfg.request_timeout_seconds)
     history: RepeaterHistory | None = None
@@ -199,7 +199,22 @@ def build_server(cfg: Config) -> MCPServer:
             packets = [p for p in packets if p.get("type") == packet_type]
         if route is not None:
             packets = [p for p in packets if p.get("route") == route]
-        return {"count": len(packets), "packets": [_trim_packet(p) for p in packets[:capped]]}
+        if packets:
+            return {
+                "count": len(packets),
+                "packets": [_trim_packet(p) for p in packets[:capped]],
+                "source": "api",
+            }
+        # The Repeater's in-memory buffer can be momentarily empty. Fall back to
+        # the packets table so callers get real data instead of a bare zero.
+        if history is not None:
+            try:
+                return history.recent_packets(
+                    limit=capped, packet_type=packet_type, route=route
+                )
+            except HistoryError as exc:
+                return {"count": 0, "packets": [], "source": "api", "fallback_error": str(exc)}
+        return {"count": 0, "packets": [], "source": "api"}
 
     @server.tool()
     async def openhop_packet_stats(hours: int = 24) -> dict[str, Any]:

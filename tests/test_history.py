@@ -39,6 +39,19 @@ def _make_db(path, packets, channels=(("Public", SECRET),)):
             id INTEGER PRIMARY KEY,
             timestamp REAL,
             type INTEGER,
+            route INTEGER,
+            length INTEGER,
+            rssi REAL,
+            snr REAL,
+            transmitted INTEGER,
+            is_duplicate INTEGER,
+            drop_reason TEXT,
+            src_hash TEXT,
+            dst_hash TEXT,
+            packet_hash TEXT,
+            payload_length INTEGER,
+            original_path TEXT,
+            forwarded_path TEXT,
             payload TEXT
         );
         CREATE TABLE companion_channels (
@@ -131,3 +144,24 @@ def test_wrong_secret_is_skipped(tmp_path):
 def test_missing_db_raises(tmp_path):
     with pytest.raises(HistoryError):
         RepeaterHistory(tmp_path / "absent.db").channels()
+
+
+def test_recent_packets_from_database(db_path):
+    result = RepeaterHistory(db_path).recent_packets(limit=3)
+    assert result["source"] == "database"
+    assert result["count"] == 3
+    assert len(result["packets"]) == 3
+    # Newest first — ids descend.
+    ids = [p["id"] for p in result["packets"]]
+    assert ids == sorted(ids, reverse=True)
+
+
+def test_recent_packets_filters_by_type(db_path):
+    result = RepeaterHistory(db_path).recent_packets(limit=10, packet_type=5)
+    assert all(p["type"] == 5 for p in result["packets"])
+    assert result["count"] > 0
+
+
+def test_recent_packets_limit_clamped(db_path):
+    result = RepeaterHistory(db_path).recent_packets(limit=0)
+    assert result["count"] >= 1

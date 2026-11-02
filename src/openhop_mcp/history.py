@@ -158,6 +158,65 @@ class RepeaterHistory:
             "source": str(self.db_path),
         }
 
+    # -- packet fallback ---------------------------------------------------
+
+    def recent_packets(
+        self,
+        *,
+        limit: int = 20,
+        packet_type: int | None = None,
+        route: int | None = None,
+    ) -> dict[str, Any]:
+        """Return recent packets straight from the database.
+
+        Used as a fallback when the Repeater's in-memory packet buffer is
+        momentarily empty. Rows are returned newest-first.
+        """
+        limit = max(1, min(int(limit), 1000))
+        sql = (
+            "SELECT id, timestamp, type, route, length, rssi, snr, transmitted, "
+            "is_duplicate, drop_reason, src_hash, dst_hash, packet_hash, "
+            "payload_length, original_path, forwarded_path "
+            "FROM packets WHERE 1=1"
+        )
+        params: list[Any] = []
+        if packet_type is not None:
+            sql += " AND type = ?"
+            params.append(int(packet_type))
+        if route is not None:
+            sql += " AND route = ?"
+            params.append(int(route))
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        conn = _open_ro(self.db_path)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+        packets = [
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "type": row["type"],
+                "route": row["route"],
+                "rssi": row["rssi"],
+                "snr": row["snr"],
+                "transmitted": row["transmitted"],
+                "is_duplicate": row["is_duplicate"],
+                "drop_reason": row["drop_reason"],
+                "src_hash": row["src_hash"],
+                "dst_hash": row["dst_hash"],
+                "packet_hash": row["packet_hash"],
+                "payload_length": row["payload_length"],
+                "original_path": row["original_path"],
+                "forwarded_path": row["forwarded_path"],
+            }
+            for row in rows
+        ]
+        return {"count": len(packets), "packets": packets, "source": "database"}
+
     # -- message history --------------------------------------------------
 
     def messages(
