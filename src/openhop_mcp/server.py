@@ -19,7 +19,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .client import OpenHopClient, OpenHopError
 from .config import Config, ConfigError, load_config
-from .security import GateMiddleware
+from .security import GateMiddleware, current_auth
 
 INSTRUCTIONS = """\
 This server exposes telemetry from an openHop Repeater (MeshCore mesh node).
@@ -114,7 +114,7 @@ def build_server(cfg: Config) -> MCPServer:
         title="openHop Repeater MCP",
         description="Authenticated telemetry access for an openHop Repeater.",
         instructions=INSTRUCTIONS,
-        version="0.1.0",
+        version="0.2.0",
     )
     api = OpenHopClient(cfg.openhop_base_url, cfg.openhop_api_key, cfg.request_timeout_seconds)
 
@@ -224,6 +224,11 @@ def build_server(cfg: Config) -> MCPServer:
             return _error(exc)
 
     @server.tool()
+    async def openhop_whoami() -> dict[str, Any]:
+        """Return the identity and role granted to the calling token."""
+        return dict(current_auth.get())
+
+    @server.tool()
     async def openhop_api_read(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """GET an allowlisted read-only Repeater endpoint, e.g. '/api/gps'.
 
@@ -252,10 +257,24 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
+    def _require_admin(operation: str) -> dict[str, Any] | None:
+        auth = current_auth.get()
+        if auth.get("role") != "admin":
+            return {
+                "error": "forbidden",
+                "reason": f"{operation} requires an admin-role token",
+                "role": auth.get("role"),
+                "name": auth.get("name"),
+            }
+        return None
+
     if not cfg.read_only:
         @server.tool()
         async def openhop_send_advert() -> dict[str, Any]:
-            """Send an advert from the Repeater. Only available when read_only=false."""
+            """Send an advert from the Repeater. Requires read_only=false and an admin token."""
+            denied = _require_admin("openhop_send_advert")
+            if denied:
+                return denied
             try:
                 return await api.post("/api/send_advert", {})
             except OpenHopError as exc:
@@ -263,7 +282,10 @@ def build_server(cfg: Config) -> MCPServer:
 
         @server.tool()
         async def openhop_set_mode(mode: str) -> dict[str, Any]:
-            """Set Repeater mode: 'forward', 'monitor', or 'no_tx'. read_only=false only."""
+            """Set Repeater mode. Requires read_only=false and an admin token."""
+            denied = _require_admin("openhop_set_mode")
+            if denied:
+                return denied
             if mode not in ("forward", "monitor", "no_tx"):
                 return {"error": "mode must be one of: forward, monitor, no_tx"}
             try:
@@ -286,20 +308,22 @@ def main() -> None:
     app = GateMiddleware(
         app,
         allowed_networks=cfg.allowed_networks,
-        auth_token=cfg.auth_token,
+        auth_tokens=cfg.auth_tokens,
+        max_auth_failures=cfg.max_auth_failures,
+        auth_failure_window_seconds=cfg.auth_failure_window_seconds,
+        auth_lockout_seconds=cfg.auth_lockout_seconds,
     )
 
+    roles = sorted({entry.role for entry in cfg.auth_tokens})
     print(
         f"[openhop-mcp] listening on {cfg.host}:{cfg.port} "
         f"allowed_ips={list(cfg.allowed_ips_raw)} read_only={cfg.read_only} "
-        f"openhop={cfg.openhop_base_url}",
+        f"tokens={len(cfg.auth_tokens)} roles={roles} openhop={cfg.openhop_base_url}",
         file=sys.stderr,
         flush=True,
     )
     if cfg.token_file.exists():
-        print(f"[openhop-mcp] bearer token available at {cfg.token_file}", file=sys.stderr, flush=True)
-    else:
-        print("[openhop-mcp] bearer token supplied via config", file=sys.stderr, flush=True)
+        print(f"[openhop-mcp] generated token available at {cfg.token_file}", file=sys.stderr, flush=True)
 
     try:
         uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")

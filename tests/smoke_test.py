@@ -24,8 +24,17 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 8799
 DENY_PORT = 8800
-TOKEN = "smoke-test-token-0123456789"
+WRITE_PORT = 8801
+TOKEN = "smoke-test-admin-0123456789"
+READ_TOKEN = "smoke-test-reader-0123456789"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _auth_tokens() -> list[dict[str, str]]:
+    return [
+        {"name": "smoke-admin", "role": "admin", "token": TOKEN},
+        {"name": "smoke-reader", "role": "read", "token": READ_TOKEN},
+    ]
 
 
 def _wait(port: int, timeout: float = 20.0) -> bool:
@@ -83,7 +92,8 @@ def _write_config(data_dir: Path, **overrides) -> None:
         "port": PORT,
         "openhop_base_url": os.environ.get("OPENHOP_BASE_URL", "http://127.0.0.1:8000"),
         "openhop_api_key": key,
-        "auth_token": TOKEN,
+        "auth_token": "",
+        "auth_tokens": _auth_tokens(),
         "allowed_ips": ["127.0.0.1/32"],
         "read_only": True,
         "allow_insecure_bind": True,
@@ -194,8 +204,35 @@ def main() -> int:
             parsed = _json_from_sse(body)
             text = json.dumps(parsed or {})
             check("openhop_stats returns live data", status == 200 and "local_hash" in text, text[:140])
+
+            status, _, body = _request(
+                "/mcp", token=TOKEN,
+                body={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "openhop_whoami", "arguments": {}}},
+                session_id=session_id,
+            )
+            text = json.dumps(_json_from_sse(body) or {})
+            check("admin token resolves to admin role", '"admin"' in text, text[:140])
         else:
             check("session id present", False, "no Mcp-Session-Id header")
+
+        # Second session using the read-only token
+        status, headers, body = _request("/mcp", token=READ_TOKEN, body=init_body)
+        reader_sid = headers.get("mcp-session-id") or headers.get("Mcp-Session-Id")
+        if reader_sid:
+            _request("/mcp", token=READ_TOKEN,
+                     body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                     session_id=reader_sid)
+            status, _, body = _request(
+                "/mcp", token=READ_TOKEN,
+                body={"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                      "params": {"name": "openhop_whoami", "arguments": {}}},
+                session_id=reader_sid,
+            )
+            text = json.dumps(_json_from_sse(body) or {})
+            check("read token resolves to read role", '"read"' in text and '"admin"' not in text, text[:140])
+        else:
+            check("read token session established", False, "no Mcp-Session-Id header")
     finally:
         _stop(proc)
 

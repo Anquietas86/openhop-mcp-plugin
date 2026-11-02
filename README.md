@@ -14,19 +14,43 @@ The MCP endpoint is protected by **two independent, fail-closed controls**:
 
 1. **Source IP allowlist** — the TCP peer address must fall inside a configured
    CIDR. Requests from anywhere else get `403`.
-2. **Bearer token** — every request needs `Authorization: Bearer <token>` (or
-   `X-Auth-Token: <token>`). Missing or wrong tokens get `401`.
+2. **Bearer token with role** — every request needs `Authorization: Bearer <token>`
+   (or `X-Auth-Token: <token>`). Missing or wrong tokens get `401`.
 
 `GET /healthz` is exempt from the token check but still requires an allowed
 source address. It returns only `{"status":"ok"}`.
+
+### Multiple keys and roles
+
+You can issue several tokens, each with a name and a role:
+
+- **`read`** — telemetry tools only. This is what a dashboard, Grafana, or an
+  AI assistant should use.
+- **`admin`** — telemetry plus mutating tools. Only granted when `read_only` is
+  `false`.
+
+Role enforcement happens per request inside the plugin. A `read` token cannot
+call a write tool even if the tool is registered — the handler returns a
+permission error without touching the Repeater API. Call `openhop_whoami` to see
+which identity and role a token has.
+
+The plugin stores token hashes nowhere; it compares against the configured
+values in constant time. Use `auth_tokens` for the multi-key form. The legacy
+single `auth_token` string still works and is treated as one `admin` token named
+`legacy`, so existing deployments upgrade without changes.
 
 Additional guardrails:
 
 - Binding to a non-loopback address requires `allow_insecure_bind: true`, so a
   careless edit cannot quietly expose the plugin to the LAN.
 - An empty or `0.0.0.0/0` allowlist is rejected unless the same flag is set.
-- If `auth_token` is empty in config, the plugin generates a random token on
-  first start and writes it to `<plugin data>/auth_token.txt` with mode `0600`.
+- If no token is configured, the plugin generates a random admin token on first
+  start and writes it to `<plugin data>/auth_token.txt` with mode `0600`.
+- Tokens shorter than 16 characters and duplicate token values are rejected at
+  startup.
+- Failed authentication is throttled per source IP: 10 failures inside 5 minutes
+  triggers a 15-minute lockout (`429` with `Retry-After`). A successful request
+  clears the counter.
 - The Repeater API key is never logged or forwarded to clients.
 - Read-only mode defaults to **true**. Write tools are not even registered unless
   the operator sets `read_only: false`.
@@ -52,6 +76,9 @@ from the manifest defaults. Edit it via the Repeater's Plugins page or
 | `request_timeout_seconds` | `15` | Upstream request timeout. |
 | `max_items` | `200` | Hard cap for list-returning tools. |
 | `allow_insecure_bind` | `false` | Acknowledge LAN exposure / wide allowlists. |
+| `max_auth_failures` | `10` | Failed auth attempts allowed per source IP within the window. |
+| `auth_failure_window_seconds` | `300` | Sliding window for counting failures. |
+| `auth_lockout_seconds` | `900` | Lockout duration once the failure limit is hit. |
 
 After changing config, restart the plugin (settings writes with `restart: true`
 do this automatically).
