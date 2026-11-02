@@ -26,11 +26,17 @@ This server exposes telemetry from an openHop Repeater (MeshCore mesh node).
 
 Tools are read-only by default. They return JSON derived from the Repeater's
 REST API. Prefer `openhop_stats` first for an overview; drill into neighbours,
-packets, noise floor, GPS, or hardware as needed.
+packets, noise floor, GPS, hardware, logs, processes, MQTT, or web frontends as
+needed.
 
-Mutating tools (`openhop_send_advert`, `openhop_set_mode`) only exist when the
-plugin operator has explicitly disabled read-only mode. If they are absent or
-return an error, read-only mode is active — do not attempt workarounds.
+Transport keys and other credential material are never exposed, even through
+`openhop_api_read`.
+
+Mutating tools (`openhop_send_advert`, `openhop_set_mode`,
+`openhop_set_duty_cycle`, `openhop_update_duty_cycle_config`,
+`openhop_update_advert_rate_limit`) only exist when the plugin operator has
+explicitly disabled read-only mode. If they are absent or return an error,
+read-only mode is active — do not attempt workarounds.
 """
 
 
@@ -114,7 +120,7 @@ def build_server(cfg: Config) -> MCPServer:
         title="openHop Repeater MCP",
         description="Authenticated telemetry access for an openHop Repeater.",
         instructions=INSTRUCTIONS,
-        version="0.2.0",
+        version="0.4.0",
     )
     api = OpenHopClient(cfg.openhop_base_url, cfg.openhop_api_key, cfg.request_timeout_seconds)
 
@@ -224,6 +230,114 @@ def build_server(cfg: Config) -> MCPServer:
             return _error(exc)
 
     @server.tool()
+    async def openhop_logs(
+        limit: int = 50,
+        level: str | None = None,
+        since_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return Repeater application logs. Newest last. Filter by level or id."""
+        try:
+            data = await api.get("/api/logs")
+        except OpenHopError as exc:
+            return _error(exc)
+        entries = data.get("logs", []) if isinstance(data, dict) else []
+        if since_id is not None:
+            entries = [e for e in entries if (e.get("id") or 0) > since_id]
+        if level:
+            wanted = level.strip().upper()
+            entries = [e for e in entries if str(e.get("level", "")).upper() == wanted]
+        capped = max(1, min(limit, cfg.max_items))
+        trimmed = [
+            {
+                "id": e.get("id"),
+                "timestamp": e.get("timestamp"),
+                "level": e.get("level"),
+                "logger": e.get("logger"),
+                "message": e.get("message"),
+            }
+            for e in entries[-capped:]
+        ]
+        return {"count": len(entries), "returned": len(trimmed), "logs": trimmed}
+
+    @server.tool()
+    async def openhop_processes(limit: int = 20, sort_by: str = "cpu") -> dict[str, Any]:
+        """Return host process resource usage. sort_by is 'cpu' or 'memory'."""
+        try:
+            data = await api.get("/api/hardware_processes")
+        except OpenHopError as exc:
+            return _error(exc)
+        payload = data.get("data", {}) if isinstance(data, dict) else {}
+        procs = payload.get("processes", []) if isinstance(payload, dict) else []
+        key = "memory_mb" if sort_by == "memory" else "cpu_percent"
+        procs = sorted(procs, key=lambda p: p.get(key) or 0, reverse=True)
+        capped = max(1, min(limit, cfg.max_items))
+        trimmed = [
+            {
+                "pid": p.get("pid"),
+                "name": p.get("name"),
+                "cpu_percent": p.get("cpu_percent"),
+                "memory_percent": p.get("memory_percent"),
+                "memory_mb": p.get("memory_mb"),
+            }
+            for p in procs[:capped]
+        ]
+        return {"count": len(procs), "returned": len(trimmed), "processes": trimmed}
+
+    @server.tool()
+    async def openhop_mqtt_status() -> dict[str, Any]:
+        """Return MQTT bridge status and per-broker connection state."""
+        try:
+            data = await api.get("/api/mqtt_status")
+        except OpenHopError as exc:
+            return _error(exc)
+        payload = data.get("data", {}) if isinstance(data, dict) else {}
+        brokers = payload.get("brokers", []) if isinstance(payload, dict) else []
+        trimmed = [
+            {
+                "name": b.get("name"),
+                "host": b.get("host"),
+                "enabled": b.get("enabled"),
+                "connected": (b.get("status") or {}).get("connected"),
+                "reconnecting": (b.get("status") or {}).get("reconnecting"),
+                "format": b.get("format"),
+                "neighbors": b.get("neighbors"),
+            }
+            for b in brokers
+        ]
+        return {
+            "handler_active": payload.get("handler_active"),
+            "broker_count": len(brokers),
+            "brokers": trimmed,
+        }
+
+    @server.tool()
+    async def openhop_web_frontends() -> dict[str, Any]:
+        """Return configured web frontends and which one is selected."""
+        try:
+            data = await api.get("/api/web_frontends")
+        except OpenHopError as exc:
+            return _error(exc)
+        payload = data.get("data", {}) if isinstance(data, dict) else {}
+        frontends = payload.get("frontends", []) if isinstance(payload, dict) else []
+        trimmed = [
+            {
+                "id": f.get("id"),
+                "kind": f.get("kind"),
+                "name": f.get("name"),
+                "version": f.get("version"),
+                "available": f.get("available"),
+                "enabled": f.get("enabled"),
+                "selected": f.get("selected"),
+            }
+            for f in frontends
+        ]
+        return {
+            "count": len(frontends),
+            "selected": payload.get("selected"),
+            "frontends": trimmed,
+        }
+
+    @server.tool()
     async def openhop_whoami() -> dict[str, Any]:
         """Return the identity and role granted to the calling token."""
         return dict(current_auth.get())
@@ -247,6 +361,12 @@ def build_server(cfg: Config) -> MCPServer:
             "update_",
             "backup",
             "import",
+            # Credential material: never readable through the generic tool.
+            "transport_keys",
+            "auth_tokens",
+            "api_key",
+            "apikey",
+            "auth_token",
         )
         if not lowered.startswith("/api/") or "://" in lowered:
             return {"error": "path must start with /api/ and be relative"}
@@ -290,6 +410,77 @@ def build_server(cfg: Config) -> MCPServer:
                 return {"error": "mode must be one of: forward, monitor, no_tx"}
             try:
                 return await api.post("/api/set_mode", {"mode": mode})
+            except OpenHopError as exc:
+                return _error(exc)
+
+        @server.tool()
+        async def openhop_set_duty_cycle(enabled: bool = True) -> dict[str, Any]:
+            """Enable or disable duty-cycle enforcement. Admin token required."""
+            denied = _require_admin("openhop_set_duty_cycle")
+            if denied:
+                return denied
+            try:
+                return await api.post("/api/set_duty_cycle", {"enabled": bool(enabled)})
+            except OpenHopError as exc:
+                return _error(exc)
+
+        @server.tool()
+        async def openhop_update_duty_cycle_config(
+            max_airtime_percent: float | None = None,
+            enforcement_enabled: bool | None = None,
+        ) -> dict[str, Any]:
+            """Update duty-cycle settings. Admin token required.
+
+            max_airtime_percent is 0.1-100.0. At least one field must be given.
+            """
+            denied = _require_admin("openhop_update_duty_cycle_config")
+            if denied:
+                return denied
+            body: dict[str, Any] = {}
+            if max_airtime_percent is not None:
+                body["max_airtime_percent"] = float(max_airtime_percent)
+            if enforcement_enabled is not None:
+                body["enforcement_enabled"] = bool(enforcement_enabled)
+            if not body:
+                return {"error": "provide max_airtime_percent and/or enforcement_enabled"}
+            try:
+                return await api.post("/api/update_duty_cycle_config", body)
+            except OpenHopError as exc:
+                return _error(exc)
+
+        _ADVERT_RATE_KEYS = {
+            "rate_limit_enabled",
+            "bucket_capacity",
+            "refill_tokens",
+            "refill_interval_seconds",
+            "min_interval_seconds",
+            "penalty_enabled",
+            "violation_threshold",
+            "violation_decay_seconds",
+            "base_penalty_seconds",
+            "penalty_multiplier",
+        }
+
+        @server.tool()
+        async def openhop_update_advert_rate_limit(settings: dict[str, Any]) -> dict[str, Any]:
+            """Update advert rate-limiting settings. Admin token required.
+
+            Accepts a settings object; unknown keys are rejected. See the Repeater
+            docs for the accepted fields (rate_limit_enabled, bucket_capacity,
+            refill_tokens, refill_interval_seconds, min_interval_seconds,
+            penalty_enabled, violation_threshold, violation_decay_seconds,
+            base_penalty_seconds, penalty_multiplier).
+            """
+            denied = _require_admin("openhop_update_advert_rate_limit")
+            if denied:
+                return denied
+            if not isinstance(settings, dict) or not settings:
+                return {"error": "settings must be a non-empty object"}
+            unknown = sorted(set(settings) - _ADVERT_RATE_KEYS)
+            if unknown:
+                return {"error": f"unknown setting(s): {', '.join(unknown)}"}
+            try:
+                return await api.post("/api/update_advert_rate_limit_config", settings)
             except OpenHopError as exc:
                 return _error(exc)
 

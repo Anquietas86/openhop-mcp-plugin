@@ -95,9 +95,19 @@ do this automatically).
 | `openhop_noise_floor` | Noise floor statistics. |
 | `openhop_gps` | GPS diagnostics and NMEA attributes. |
 | `openhop_hardware` | Host CPU/RAM/disk/temperature stats. |
+| `openhop_logs` | Repeater application logs, filterable by level or id. |
+| `openhop_processes` | Host process CPU/memory usage. |
+| `openhop_mqtt_status` | MQTT bridge and per-broker connection state. |
+| `openhop_web_frontends` | Configured web frontends and selection. |
 | `openhop_api_read` | Constrained GET against an allowlisted `/api/` path. |
 | `openhop_send_advert` | *Write, only when `read_only=false`.* |
 | `openhop_set_mode` | *Write, only when `read_only=false`.* |
+| `openhop_set_duty_cycle` | *Write, only when `read_only=false`.* |
+| `openhop_update_duty_cycle_config` | *Write, only when `read_only=false`.* |
+| `openhop_update_advert_rate_limit` | *Write, only when `read_only=false`.* |
+
+`openhop_api_read` refuses credential-bearing paths such as
+`/api/transport_keys`, along with streaming and mutating routes.
 
 ## Client configuration
 
