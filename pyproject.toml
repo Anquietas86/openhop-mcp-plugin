@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openhop-mcp-plugin"
+version = "0.1.0"
+description = "Authenticated MCP server exposing openHop Repeater telemetry"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Anquietas86" }]
+keywords = ["mcp", "model-context-protocol", "openhop", "meshcore", "repeater", "telemetry"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "httpx2>=2.16",
+]
+
+[project.optional-dependencies]
+dev = ["build", "pytest", "pytest-asyncio"]
+
+[project.urls]
+Homepage = "https://github.com/Anquietas86/openhop-mcp-plugin"
+Issues = "https://github.com/Anquietas86/openhop-mcp-plugin/issues"
+
+[project.scripts]
+openhop-mcp = "openhop_mcp.server:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["openhop_mcp"]
+
+[tool.setuptools.data-files]
+"share/openhop/plugins/openhop.mcp" = ["openhop-plugin.json", "README.md"]
