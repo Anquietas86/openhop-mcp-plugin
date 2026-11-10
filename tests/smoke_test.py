@@ -24,7 +24,6 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 8799
 DENY_PORT = 8800
-WRITE_PORT = 8801
 TOKEN = "smoke-test-admin-0123456789"
 READ_TOKEN = "smoke-test-reader-0123456789"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,9 +47,15 @@ def _wait(port: int, timeout: float = 20.0) -> bool:
     return False
 
 
-def _request(path: str, *, port: int = PORT, token: str | None = None,
-             body: dict | None = None, session_id: str | None = None,
-             timeout: float = 20.0) -> tuple[int, dict[str, str], bytes]:
+def _request(
+    path: str,
+    *,
+    port: int = PORT,
+    token: str | None = None,
+    body: dict | None = None,
+    session_id: str | None = None,
+    timeout: float = 20.0,
+) -> tuple[int, dict[str, str], bytes]:
     headers = {"Accept": "application/json, text/event-stream"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -120,7 +125,7 @@ def _start(data_dir: Path, port: int) -> subprocess.Popen:
             try:
                 proc.terminate()
                 output = proc.stdout.read()[-3000:]
-            except Exception:
+            except Exception:  # noqa: S110 - best effort while reporting a failure
                 pass
         raise RuntimeError(f"server on port {port} failed to start. Output:\n{output}")
     return proc
@@ -158,9 +163,16 @@ def main() -> int:
         status, _, _ = _request("/healthz")
         check("healthz without token returns 200", status == 200, str(status))
 
-        init_body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                     "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                                "clientInfo": {"name": "smoke", "version": "1"}}}
+        init_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "smoke", "version": "1"},
+            },
+        }
 
         status, headers, _ = _request("/mcp", body=init_body)
         check("mcp without token returns 401", status == 401, str(status))
@@ -173,41 +185,94 @@ def main() -> int:
         status, headers, body = _request("/mcp", token=TOKEN, body=init_body)
         session_id = headers.get("mcp-session-id") or headers.get("Mcp-Session-Id")
         parsed = _json_from_sse(body)
-        check("initialize with valid token succeeds", status == 200 and parsed is not None,
-              f"status={status} session={bool(session_id)}")
+        check(
+            "initialize with valid token succeeds",
+            status == 200 and parsed is not None,
+            f"status={status} session={bool(session_id)}",
+        )
 
         if session_id:
-            _request("/mcp", token=TOKEN,
-                     body={"jsonrpc": "2.0", "method": "notifications/initialized"},
-                     session_id=session_id)
+            _request(
+                "/mcp",
+                token=TOKEN,
+                body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                session_id=session_id,
+            )
             status, _, body = _request(
-                "/mcp", token=TOKEN,
+                "/mcp",
+                token=TOKEN,
                 body={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
                 session_id=session_id,
             )
             parsed = _json_from_sse(body)
             tools = [t["name"] for t in (parsed or {}).get("result", {}).get("tools", [])]
-            expected = {"openhop_stats", "openhop_neighbors", "openhop_recent_packets",
-                        "openhop_gps", "openhop_api_read"}
-            check("tools/list returns read tools", status == 200 and expected.issubset(set(tools)),
-                  f"{len(tools)} tools")
-            check("write tools absent in read-only mode",
-                  "openhop_send_advert" not in tools and "openhop_set_mode" not in tools)
+            expected = {
+                "openhop_stats",
+                "openhop_neighbors",
+                "openhop_recent_packets",
+                "openhop_gps",
+                "openhop_api_read",
+            }
+            check(
+                "tools/list returns read tools",
+                status == 200 and expected.issubset(set(tools)),
+                f"{len(tools)} tools",
+            )
+            check(
+                "write tools absent in read-only mode",
+                "openhop_send_advert" not in tools and "openhop_set_mode" not in tools,
+            )
 
             status, _, body = _request(
-                "/mcp", token=TOKEN,
-                body={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                      "params": {"name": "openhop_stats", "arguments": {"summary": True}}},
+                "/mcp",
+                token=TOKEN,
+                body={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "openhop_stats", "arguments": {"summary": True}},
+                },
                 session_id=session_id,
             )
             parsed = _json_from_sse(body)
             text = json.dumps(parsed or {})
-            check("openhop_stats returns live data", status == 200 and "local_hash" in text, text[:140])
+            if os.environ.get("OPENHOP_SMOKE_LIVE"):
+                check("openhop_stats returns live data", status == 200 and "local_hash" in text, text[:140])
+            else:
+                check(
+                    "openhop_stats responds (no live Repeater)",
+                    status == 200 and parsed is not None,
+                    "set OPENHOP_SMOKE_LIVE=1 to require live data",
+                )
+
+            tool_meta = {
+                t["name"]: t
+                for t in (
+                    _json_from_sse(
+                        _request(
+                            "/mcp",
+                            token=TOKEN,
+                            body={"jsonrpc": "2.0", "id": 30, "method": "tools/list", "params": {}},
+                            session_id=session_id,
+                        )[2]
+                    )
+                    or {}
+                )
+                .get("result", {})
+                .get("tools", [])
+            }
+            hints = tool_meta.get("openhop_stats", {}).get("annotations") or {}
+            check("read tools carry readOnlyHint", hints.get("readOnlyHint") is True, json.dumps(hints))
 
             status, _, body = _request(
-                "/mcp", token=TOKEN,
-                body={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-                      "params": {"name": "openhop_whoami", "arguments": {}}},
+                "/mcp",
+                token=TOKEN,
+                body={
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {"name": "openhop_whoami", "arguments": {}},
+                },
                 session_id=session_id,
             )
             text = json.dumps(_json_from_sse(body) or {})
@@ -219,19 +284,54 @@ def main() -> int:
         status, headers, body = _request("/mcp", token=READ_TOKEN, body=init_body)
         reader_sid = headers.get("mcp-session-id") or headers.get("Mcp-Session-Id")
         if reader_sid:
-            _request("/mcp", token=READ_TOKEN,
-                     body={"jsonrpc": "2.0", "method": "notifications/initialized"},
-                     session_id=reader_sid)
+            _request(
+                "/mcp",
+                token=READ_TOKEN,
+                body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                session_id=reader_sid,
+            )
             status, _, body = _request(
-                "/mcp", token=READ_TOKEN,
-                body={"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                      "params": {"name": "openhop_whoami", "arguments": {}}},
+                "/mcp",
+                token=READ_TOKEN,
+                body={
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "openhop_whoami", "arguments": {}},
+                },
                 session_id=reader_sid,
             )
             text = json.dumps(_json_from_sse(body) or {})
             check("read token resolves to read role", '"read"' in text and '"admin"' not in text, text[:140])
+
+            for blocked in ("/api/plugins/settings", "/api/identity_export", "/api/transport%5Fkeys"):
+                status, _, body = _request(
+                    "/mcp",
+                    token=READ_TOKEN,
+                    body={
+                        "jsonrpc": "2.0",
+                        "id": 6,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "openhop_api_read",
+                            "arguments": {"path": blocked, "params": {"id": "openhop.mcp"}},
+                        },
+                    },
+                    session_id=reader_sid,
+                )
+                text = json.dumps(_json_from_sse(body) or {})
+                check(f"api_read refuses {blocked}", "read-only policy" in text, text[:140])
         else:
             check("read token session established", False, "no Mcp-Session-Id header")
+        audit_path = allowed_dir / "audit.log"
+        records = (
+            [json.loads(line) for line in audit_path.read_text().splitlines()] if audit_path.exists() else []
+        )
+        check(
+            "audit log records tool calls",
+            any(r.get("target") == "openhop_whoami" and r.get("token") == "smoke-reader" for r in records),
+            f"{len(records)} records",
+        )
     finally:
         _stop(proc)
 

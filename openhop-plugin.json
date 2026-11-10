@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "openhop.mcp",
   "name": "openHop MCP Server",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Model Context Protocol server exposing openHop Repeater telemetry over authenticated, IP-whitelisted HTTP.",
   "runtime": {
     "type": "python",
@@ -15,7 +15,10 @@
       "openhop_base_url": "http://127.0.0.1:8000",
       "openhop_api_key": "",
       "auth_tokens": [],
-      "allowed_ips": ["127.0.0.1/32", "::1/128"],
+      "allowed_ips": [
+        "127.0.0.1/32",
+        "::1/128"
+      ],
       "read_only": true,
       "request_timeout_seconds": 15,
       "max_items": 200,
@@ -24,7 +27,11 @@
       "auth_failure_window_seconds": 300,
       "auth_lockout_seconds": 900,
       "repeater_db_path": "/var/lib/openhop_repeater/repeater.db",
-      "allow_message_history": true
+      "allow_message_history": true,
+      "cache_ttl_seconds": 3,
+      "audit_log": true,
+      "audit_log_max_bytes": 1000000,
+      "rate_limit_per_minute": 120
     }
   }
 }

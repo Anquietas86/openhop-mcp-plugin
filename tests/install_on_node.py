@@ -6,6 +6,7 @@ It deliberately prints only status/JSON bodies, never the key.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -15,9 +16,16 @@ from pathlib import Path
 
 BASE = os.environ.get("OPENHOP_BASE_URL", "http://127.0.0.1:8000")
 KEY_FILE = Path(os.environ.get("OPENHOP_KEY_FILE", "/tmp/.pymc_key"))
-WHEEL = os.environ.get(
-    "OPENHOP_WHEEL", "/tmp/openhop_mcp_plugin-0.1.0-py3-none-any.whl"
-)
+
+
+def _default_wheel() -> str:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from openhop_mcp import __version__
+
+    return f"/tmp/openhop_mcp_plugin-{__version__}-py3-none-any.whl"
+
+
+WHEEL = os.environ.get("OPENHOP_WHEEL") or _default_wheel()
 # Comma-separated CIDRs permitted to reach the MCP endpoint. Override this with
 # the address of the host that will connect, e.g. "127.0.0.1/32,192.0.2.10/32".
 ALLOWED_IPS = os.environ.get("OPENHOP_ALLOWED_IPS", "127.0.0.1/32,::1/128")
@@ -36,10 +44,8 @@ def call(method: str, path: str, payload: dict | None = None, timeout: float = 3
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             body = json.loads(body)
-        except json.JSONDecodeError:
-            pass
         return exc.code, body
 
 

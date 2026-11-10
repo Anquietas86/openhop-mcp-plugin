@@ -5,6 +5,11 @@ Two independent controls, both fail-closed:
 1. **IP allowlist** — the TCP peer address must fall inside a configured CIDR.
 2. **Bearer token** — every request must carry a configured token.
 
+Only SHA-256 digests of tokens are held in memory. Operators can configure
+either the plaintext token or its digest (``token_sha256``); plaintext entries
+are hashed at load time. Tokens are high-entropy random strings, so a plain
+SHA-256 is the right primitive here (no salt or KDF needed).
+
 Tokens carry a role (``read`` or ``admin``). The role is resolved here and
 exposed to tool handlers through a context variable, so read-only credentials
 cannot reach mutating tools even when the plugin runs with ``read_only``
@@ -19,6 +24,7 @@ nothing beyond liveness.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -26,13 +32,14 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Sequence
+from typing import Any
 
-Scope = dict
-Receive = Callable[[], Awaitable[dict]]
-Send = Callable[[dict], Awaitable[None]]
+Scope = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
+Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 HEALTH_PATH = "/healthz"
@@ -42,19 +49,30 @@ ALT_AUTH_HEADER = b"x-auth-token"
 ROLES = frozenset({"read", "admin"})
 
 
+def hash_token(token: str) -> str:
+    """Return the lowercase hex SHA-256 of ``token``."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class TokenEntry:
-    """A configured bearer token and the role it grants."""
+    """A configured bearer token (as a SHA-256 digest) and the role it grants."""
 
     name: str
     role: str
-    token: str = field(repr=False)
+    sha256: str = field(repr=False)
+
+    @classmethod
+    def from_token(cls, name: str, role: str, token: str) -> TokenEntry:
+        return cls(name=name, role=role, sha256=hash_token(token) if token else "")
 
 
 #: Resolved identity for the current MCP request. Tool handlers read this to
 #: decide whether a mutating operation is permitted.
 current_auth: ContextVar[dict[str, str]] = ContextVar(
-    "openhop_auth", default={"name": "anonymous", "role": "read"}
+    # Never mutated: readers copy it, and the gate always .set()s a new dict.
+    "openhop_auth",
+    default={"name": "anonymous", "role": "read", "ip": ""},  # noqa: B039
 )
 
 
@@ -123,8 +141,8 @@ class GateMiddleware:
         if not auth_tokens:
             raise ValueError("auth_tokens must not be empty")
         for entry in auth_tokens:
-            if not entry.token:
-                raise ValueError(f"token {entry.name!r} is empty")
+            if len(entry.sha256) != 64:
+                raise ValueError(f"token {entry.name!r} has no valid SHA-256 digest")
             if entry.role not in ROLES:
                 raise ValueError(f"token {entry.name!r} has invalid role {entry.role!r}")
         if max_auth_failures < 1:
@@ -190,22 +208,29 @@ class GateMiddleware:
     def _authenticate(self, provided: str) -> TokenEntry | None:
         """Return the matching token entry.
 
-        Every configured token is compared so the response time does not reveal
-        which entry matched. ``compare_digest`` keeps each comparison constant
-        time for equal-length inputs.
+        The presented token is hashed once, then compared against every stored
+        digest so the response time does not reveal which entry matched. All
+        digests are the same length, so ``compare_digest`` is constant time.
         """
         if not provided:
             return None
-        provided_bytes = provided.encode("utf-8")
+        provided_digest = hash_token(provided).encode("ascii")
         match: TokenEntry | None = None
         for entry in self.auth_tokens:
-            if hmac.compare_digest(provided_bytes, entry.token.encode("utf-8")):
+            if hmac.compare_digest(provided_digest, entry.sha256.encode("ascii")):
                 match = entry
         return match
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http":
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
             await self.app(scope, receive, send)
+            return
+        if scope_type != "http":
+            # The MCP endpoint is HTTP only. Refuse anything else (websockets)
+            # instead of passing it through unauthenticated.
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
             return
 
         client = scope.get("client") or ("", 0)
@@ -257,7 +282,7 @@ class GateMiddleware:
             return
 
         self._clear_failures(key)
-        token_ctx = current_auth.set({"name": entry.name, "role": entry.role})
+        token_ctx = current_auth.set({"name": entry.name, "role": entry.role, "ip": key})
         try:
             await self.app(scope, receive, send)
         finally:

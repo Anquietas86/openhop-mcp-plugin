@@ -31,6 +31,7 @@ def main() -> int:
     assert manifest.id == "openhop.mcp", manifest
     assert manifest.runtime.type == "python"
     assert manifest.runtime.entrypoint == "openhop-mcp"
+    assert f"-{manifest.version}-" in wheel.name, (manifest.version, wheel.name)
     print(f"PASS manifest: {manifest.id} {manifest.version} -> {manifest.runtime.entrypoint}")
 
     with ZipFile(wheel) as archive:

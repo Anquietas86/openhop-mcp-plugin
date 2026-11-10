@@ -7,6 +7,7 @@ import json
 import pytest
 
 from openhop_mcp.config import ConfigError, _parse_networks, load_config
+from openhop_mcp.security import hash_token
 
 
 @pytest.fixture(autouse=True)
@@ -60,14 +61,14 @@ def test_generated_token_is_persisted(tmp_path, monkeypatch):
     cfg = load_config()
     token_file = tmp_path / "auth_token.txt"
     assert token_file.exists()
-    assert token_file.read_text().strip() == cfg.auth_tokens[0].token
+    assert hash_token(token_file.read_text().strip()) == cfg.auth_tokens[0].sha256
     assert (token_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_generated_token_is_stable_across_loads(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENHOP_MCP_DATA", str(tmp_path))
-    first = load_config().auth_tokens[0].token
-    second = load_config().auth_tokens[0].token
+    first = load_config().auth_tokens[0].sha256
+    second = load_config().auth_tokens[0].sha256
     assert first == second
 
 
@@ -139,9 +140,7 @@ def test_rejects_wildcard_allowlist_without_flag(tmp_path, monkeypatch):
 
 
 def test_allows_wildcard_allowlist_with_flag(tmp_path, monkeypatch):
-    cfg = _load(
-        tmp_path, monkeypatch, allowed_ips=["0.0.0.0/0"], allow_insecure_bind=True
-    )
+    cfg = _load(tmp_path, monkeypatch, allowed_ips=["0.0.0.0/0"], allow_insecure_bind=True)
     assert cfg.allowed_ips_raw == ("0.0.0.0/0",)
 
 
@@ -153,3 +152,49 @@ def test_rejects_bad_port(tmp_path, monkeypatch):
 def test_rejects_non_bool_read_only(tmp_path, monkeypatch):
     with pytest.raises(ConfigError, match="read_only must be a boolean"):
         _load(tmp_path, monkeypatch, read_only="yes")
+
+
+def test_token_sha256_entries_accepted(tmp_path, monkeypatch):
+    digest = hash_token("hashed-token-abcdefghijklmnop")
+    cfg = _load(
+        tmp_path,
+        monkeypatch,
+        auth_tokens=[{"name": "dash", "role": "read", "token_sha256": digest.upper()}],
+    )
+    assert cfg.auth_tokens[0].sha256 == digest
+    assert cfg.auth_tokens[0].role == "read"
+
+
+@pytest.mark.parametrize("bad", ["abc", "g" * 64, ""])
+def test_token_sha256_must_be_hex64(tmp_path, monkeypatch, bad):
+    with pytest.raises(ConfigError):
+        _load(tmp_path, monkeypatch, auth_tokens=[{"name": "dash", "role": "read", "token_sha256": bad}])
+
+
+def test_token_and_hash_together_rejected(tmp_path, monkeypatch):
+    with pytest.raises(ConfigError):
+        _load(
+            tmp_path,
+            monkeypatch,
+            auth_tokens=[
+                {
+                    "name": "x",
+                    "role": "read",
+                    "token": "plain-token-abcdefghijklmnop",
+                    "token_sha256": hash_token("plain-token-abcdefghijklmnop"),
+                }
+            ],
+        )
+
+
+def test_duplicate_plain_and_hashed_token_rejected(tmp_path, monkeypatch):
+    token = "same-token-abcdefghijklmnop"
+    with pytest.raises(ConfigError):
+        _load(
+            tmp_path,
+            monkeypatch,
+            auth_tokens=[
+                {"name": "a", "role": "read", "token": token},
+                {"name": "b", "role": "admin", "token_sha256": hash_token(token)},
+            ],
+        )
