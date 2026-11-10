@@ -7,6 +7,7 @@ invalid or unsafe settings abort startup instead of silently degrading security.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .security import ROLES, TokenEntry
+from .security import ROLES, TokenEntry, hash_token
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "host": "127.0.0.1",
@@ -33,6 +34,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auth_lockout_seconds": 900,
     "repeater_db_path": "/var/lib/openhop_repeater/repeater.db",
     "allow_message_history": True,
+    "cache_ttl_seconds": 3,
+    "audit_log": True,
+    "audit_log_max_bytes": 1_000_000,
+    "rate_limit_per_minute": 120,
 }
 
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -63,6 +68,14 @@ class Config:
     token_file: Path = field(repr=False)
     repeater_db_path: str = ""
     allow_message_history: bool = True
+    cache_ttl_seconds: float = 3.0
+    audit_log: bool = True
+    audit_log_max_bytes: int = 1_000_000
+    rate_limit_per_minute: int = 120
+
+    @property
+    def audit_log_path(self) -> Path:
+        return self.data_dir / "audit.log"
 
 
 def _data_dir() -> Path:
@@ -104,11 +117,12 @@ def _parse_networks(values: Any) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6
 
 def _write_token(token_file: Path, token: str) -> None:
     token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(token + "\n", encoding="utf-8")
-    try:
+    # Create with 0600 up front so the token is never briefly world-readable.
+    fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token + "\n")
+    with contextlib.suppress(OSError):
         token_file.chmod(0o600)
-    except OSError:
-        pass
 
 
 def _load_or_create_token(data_dir: Path, configured: str) -> str:
@@ -125,21 +139,28 @@ def _load_or_create_token(data_dir: Path, configured: str) -> str:
     return generated
 
 
-def _token_entry(name: str, role: str, token: str) -> TokenEntry:
+_HEX = frozenset("0123456789abcdef")
+
+
+def _token_entry(name: str, role: str, token: str = "", token_sha256: str = "") -> TokenEntry:
     cleaned = token.strip()
-    if not cleaned:
+    digest = token_sha256.strip().lower()
+    if cleaned and digest:
+        raise ConfigError(f"token {name!r}: set either token or token_sha256, not both")
+    if not cleaned and not digest:
         raise ConfigError(f"token {name!r} is empty")
-    if len(cleaned) < MIN_TOKEN_LENGTH:
-        raise ConfigError(
-            f"token {name!r} is too short ({len(cleaned)} chars); "
-            f"use at least {MIN_TOKEN_LENGTH}"
-        )
+    if cleaned:
+        if len(cleaned) < MIN_TOKEN_LENGTH:
+            raise ConfigError(
+                f"token {name!r} is too short ({len(cleaned)} chars); use at least {MIN_TOKEN_LENGTH}"
+            )
+        digest = hash_token(cleaned)
+    elif len(digest) != 64 or not set(digest) <= _HEX:
+        raise ConfigError(f"token {name!r}: token_sha256 must be 64 hex characters")
     normalised_role = role.strip().lower()
     if normalised_role not in ROLES:
-        raise ConfigError(
-            f"token {name!r} has invalid role {role!r}; use one of {sorted(ROLES)}"
-        )
-    return TokenEntry(name=name.strip() or "unnamed", role=normalised_role, token=cleaned)
+        raise ConfigError(f"token {name!r} has invalid role {role!r}; use one of {sorted(ROLES)}")
+    return TokenEntry(name=name.strip() or "unnamed", role=normalised_role, sha256=digest)
 
 
 def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry, ...]:
@@ -147,8 +168,9 @@ def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry,
 
     Supported shapes:
 
-    * ``auth_tokens``: list of objects ``{"name", "role", "token"}`` or bare
-      token strings (treated as admin).
+    * ``auth_tokens``: list of objects ``{"name", "role", "token"}`` or
+      ``{"name", "role", "token_sha256"}`` (preferred: the config file then
+      holds no usable credential), or bare token strings (treated as admin).
     * empty: generate a random admin token and persist it to ``auth_token.txt``.
     """
     entries_raw = raw.get("auth_tokens") or []
@@ -163,11 +185,11 @@ def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry,
             name = str(item.get("name") or f"token-{index}")
             role = str(item.get("role") or "read")
             token = str(item.get("token") or "")
-            tokens.append(_token_entry(name, role, token))
+            token_sha256 = str(item.get("token_sha256") or "")
+            tokens.append(_token_entry(name, role, token, token_sha256))
         else:
             raise ConfigError(
-                f"auth_tokens[{index - 1}] must be an object or string, "
-                f"got {type(item).__name__}"
+                f"auth_tokens[{index - 1}] must be an object or string, got {type(item).__name__}"
             )
 
     if not tokens:
@@ -176,9 +198,9 @@ def _parse_auth_tokens(raw: dict[str, Any], data_dir: Path) -> tuple[TokenEntry,
 
     seen: set[str] = set()
     for entry in tokens:
-        if entry.token in seen:
+        if entry.sha256 in seen:
             raise ConfigError(f"duplicate token value configured for {entry.name!r}")
-        seen.add(entry.token)
+        seen.add(entry.sha256)
 
     return tuple(tokens)
 
@@ -268,6 +290,31 @@ def load_config() -> Config:
     if repeater_db_path and not Path(repeater_db_path).is_absolute():
         raise ConfigError("repeater_db_path must be an absolute path")
 
+    try:
+        cache_ttl_seconds = float(raw.get("cache_ttl_seconds", 3))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("cache_ttl_seconds must be a number") from exc
+    if not 0 <= cache_ttl_seconds <= 300:
+        raise ConfigError("cache_ttl_seconds must be between 0 and 300")
+
+    audit_log = raw.get("audit_log", True)
+    if not isinstance(audit_log, bool):
+        raise ConfigError("audit_log must be a boolean")
+
+    try:
+        audit_log_max_bytes = int(raw.get("audit_log_max_bytes", 1_000_000))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("audit_log_max_bytes must be an integer") from exc
+    if audit_log_max_bytes < 10_000:
+        raise ConfigError("audit_log_max_bytes must be at least 10000")
+
+    try:
+        rate_limit_per_minute = int(raw.get("rate_limit_per_minute", 120))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("rate_limit_per_minute must be an integer") from exc
+    if rate_limit_per_minute < 0:
+        raise ConfigError("rate_limit_per_minute must be >= 0 (0 disables)")
+
     auth_tokens = _parse_auth_tokens(raw, data_dir)
 
     return Config(
@@ -289,4 +336,8 @@ def load_config() -> Config:
         token_file=data_dir / "auth_token.txt",
         repeater_db_path=repeater_db_path,
         allow_message_history=allow_message_history,
+        cache_ttl_seconds=cache_ttl_seconds,
+        audit_log=audit_log,
+        audit_log_max_bytes=audit_log_max_bytes,
+        rate_limit_per_minute=rate_limit_per_minute,
     )

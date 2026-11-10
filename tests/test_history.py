@@ -24,7 +24,7 @@ def _encode(body: str, secret: bytes = SECRET, flags: int = 0, ts: int | None = 
     """Build a group-text payload in the format the Repeater logs."""
     stamp = ts if ts is not None else int(time.time())
     plaintext = struct.pack("<I", stamp) + bytes([flags]) + body.encode() + b"\x00"
-    encryptor = Cipher(algorithms.AES(secret[:16]), modes.ECB()).encryptor()
+    encryptor = Cipher(algorithms.AES(secret[:16]), modes.ECB()).encryptor()  # noqa: S305
     padded = plaintext + b"\x00" * (-len(plaintext) % 16)
     ciphertext = encryptor.update(padded) + encryptor.finalize()
     mac = hmac.new(secret, ciphertext, hashlib.sha256).digest()[:2]

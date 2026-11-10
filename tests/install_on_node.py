@@ -6,6 +6,7 @@ It deliberately prints only status/JSON bodies, never the key.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -15,6 +16,8 @@ from pathlib import Path
 
 BASE = os.environ.get("OPENHOP_BASE_URL", "http://127.0.0.1:8000")
 KEY_FILE = Path(os.environ.get("OPENHOP_KEY_FILE", "/tmp/.pymc_key"))
+
+
 def _default_wheel() -> str:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     from openhop_mcp import __version__
@@ -41,10 +44,8 @@ def call(method: str, path: str, payload: dict | None = None, timeout: float = 3
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             body = json.loads(body)
-        except json.JSONDecodeError:
-            pass
         return exc.code, body
 
 

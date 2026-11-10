@@ -91,7 +91,8 @@ def _decode_payload(payload_hex: str, secret: bytes) -> tuple[int, int, str] | N
     if not hmac.compare_digest(mac, expected):
         return None
     try:
-        decryptor = Cipher(algorithms.AES(secret[:16]), modes.ECB()).decryptor()
+        # MeshCore group text is AES-128-ECB by protocol; this only decrypts it.
+        decryptor = Cipher(algorithms.AES(secret[:16]), modes.ECB()).decryptor()  # noqa: S305
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
     except Exception:  # pragma: no cover - malformed ciphertext
         return None
@@ -125,9 +126,7 @@ class RepeaterHistory:
                 return self._secrets
             conn = _open_ro(self.db_path)
             try:
-                rows = conn.execute(
-                    "SELECT name, secret FROM companion_channels"
-                ).fetchall()
+                rows = conn.execute("SELECT name, secret FROM companion_channels").fetchall()
             finally:
                 conn.close()
             secrets: dict[str, list[bytes]] = {}
@@ -162,9 +161,7 @@ class RepeaterHistory:
             name = row["name"]
             if not name:
                 continue
-            entry = by_name.setdefault(
-                str(name), {"name": str(name), "indices": [], "companions": []}
-            )
+            entry = by_name.setdefault(str(name), {"name": str(name), "indices": [], "companions": []})
             if row["channel_idx"] not in entry["indices"]:
                 entry["indices"].append(row["channel_idx"])
             if row["companion_hash"] not in entry["companions"]:
@@ -255,11 +252,7 @@ class RepeaterHistory:
 
         secrets = self._load_secrets()
         if channel:
-            candidates = {
-                name: blobs
-                for name, blobs in secrets.items()
-                if name.lower() == channel.lower()
-            }
+            candidates = {name: blobs for name, blobs in secrets.items() if name.lower() == channel.lower()}
             if not candidates:
                 return {
                     "error": "unknown channel",
@@ -272,9 +265,7 @@ class RepeaterHistory:
         # Pair each key with its channel-hash byte so most packets can be
         # skipped without computing an HMAC.
         keyed: list[tuple[str, bytes, frozenset[int]]] = [
-            (name, blob, channel_hashes(blob))
-            for name, blobs in candidates.items()
-            for blob in blobs
+            (name, blob, channel_hashes(blob)) for name, blobs in candidates.items() for blob in blobs
         ]
 
         conn = _open_ro(self.db_path)

@@ -16,8 +16,10 @@ from openhop_mcp.security import (
     current_auth,
 )
 
-ADMIN = TokenEntry(name="admin", role="admin", token="admin-token-abcdefghijklmnop")
-READER = TokenEntry(name="reader", role="read", token="read-token-abcdefghijklmnop")
+ADMIN_TOKEN = "admin-token-abcdefghijklmnop"
+READER_TOKEN = "read-token-abcdefghijklmnop"
+ADMIN = TokenEntry.from_token("admin", "admin", ADMIN_TOKEN)
+READER = TokenEntry.from_token("reader", "read", READER_TOKEN)
 
 
 def _scope(path: str = "/mcp", client: str = "127.0.0.1", headers=None) -> dict:
@@ -104,12 +106,12 @@ def test_normalise_ip(raw, expected):
 
 
 def test_extract_bearer_authorization():
-    assert _extract_bearer(_scope(headers=_auth(ADMIN.token))) == ADMIN.token
+    assert _extract_bearer(_scope(headers=_auth(ADMIN_TOKEN))) == ADMIN_TOKEN
 
 
 def test_extract_bearer_alt_header():
-    scope = _scope(headers=[(b"x-auth-token", ADMIN.token.encode())])
-    assert _extract_bearer(scope) == ADMIN.token
+    scope = _scope(headers=[(b"x-auth-token", ADMIN_TOKEN.encode())])
+    assert _extract_bearer(scope) == ADMIN_TOKEN
 
 
 def test_extract_bearer_malformed():
@@ -131,12 +133,12 @@ def test_ip_allowed():
 
 
 def test_authenticate_admin_token():
-    entry = _gate()._authenticate(ADMIN.token)
+    entry = _gate()._authenticate(ADMIN_TOKEN)
     assert entry is not None and entry.role == "admin"
 
 
 def test_authenticate_read_token():
-    entry = _gate(tokens=(ADMIN, READER))._authenticate(READER.token)
+    entry = _gate(tokens=(ADMIN, READER))._authenticate(READER_TOKEN)
     assert entry is not None and entry.role == "read"
 
 
@@ -179,16 +181,14 @@ def test_wrong_token_rejected():
 
 
 def test_valid_admin_token_passes_and_sets_role():
-    rec = asyncio.run(_call(_gate(), _scope(headers=_auth(ADMIN.token))))
+    rec = asyncio.run(_call(_gate(), _scope(headers=_auth(ADMIN_TOKEN))))
     assert rec.status == 200
     assert rec.body == b"ok"
     assert rec.role_seen == "admin"
 
 
 def test_valid_read_token_passes_and_sets_role():
-    rec = asyncio.run(
-        _call(_gate(tokens=(ADMIN, READER)), _scope(headers=_auth(READER.token)))
-    )
+    rec = asyncio.run(_call(_gate(tokens=(ADMIN, READER)), _scope(headers=_auth(READER_TOKEN))))
     assert rec.status == 200
     assert rec.role_seen == "read"
 
@@ -204,13 +204,13 @@ def test_constructor_rejects_empty_tokens():
 
 
 def test_constructor_rejects_invalid_role():
-    bad = TokenEntry(name="bad", role="superuser", token="x" * 32)
+    bad = TokenEntry.from_token("bad", "superuser", "x" * 32)
     with pytest.raises(ValueError):
         _gate(tokens=(bad,))
 
 
 def test_constructor_rejects_empty_token_value():
-    bad = TokenEntry(name="empty", role="read", token="")
+    bad = TokenEntry(name="empty", role="read", sha256="")
     with pytest.raises(ValueError):
         _gate(tokens=(bad,))
 
@@ -240,7 +240,7 @@ def test_locked_out_ip_gets_429():
 def test_successful_auth_clears_failures():
     gate = _gate(max_auth_failures=2)
     gate._record_failure("127.0.0.1")
-    rec = asyncio.run(_call(gate, _scope(headers=_auth(ADMIN.token))))
+    rec = asyncio.run(_call(gate, _scope(headers=_auth(ADMIN_TOKEN))))
     assert rec.status == 200
     assert gate._lockout_remaining("127.0.0.1") == 0.0
     assert "127.0.0.1" not in gate._failures

@@ -48,14 +48,30 @@ def test_rejected_paths(path):
 
 def test_allowlist_has_no_sensitive_entries():
     for path in ALLOWED_API_PATHS:
-        for word in ("key", "token", "secret", "export", "import", "plugin", "config",
-                     "identit", "stream", "companion", "update", "auth", "acl", "policy"):
+        for word in (
+            "key",
+            "token",
+            "secret",
+            "export",
+            "import",
+            "plugin",
+            "config",
+            "identit",
+            "stream",
+            "companion",
+            "update",
+            "auth",
+            "acl",
+            "policy",
+        ):
             assert word not in path, (path, word)
 
 
 def test_clean_params_accepts_scalars():
     assert clean_params({"hours": 24, "type": "advert", "flag": True}) == {
-        "hours": 24, "type": "advert", "flag": True,
+        "hours": 24,
+        "type": "advert",
+        "flag": True,
     }
     assert clean_params(None) is None
 
@@ -73,3 +89,21 @@ def test_clean_params_accepts_scalars():
 def test_clean_params_rejects_bad_input(params):
     with pytest.raises(PolicyError):
         clean_params(params)
+
+
+def test_redact_nested_and_case_insensitive():
+    from openhop_mcp.client import REDACTED, redact
+
+    data = {
+        "web": {"JWT_Secret": "x", "port": 80},
+        "list": [{"Password": "p"}],
+        "refill_tokens": 3,
+        "public_key": "abc",
+        "token": "",
+    }
+    out = redact(data)
+    assert out["web"] == {"JWT_Secret": REDACTED, "port": 80}
+    assert out["list"] == [{"Password": REDACTED}]
+    assert out["refill_tokens"] == 3
+    assert out["public_key"] == "abc"
+    assert out["token"] == ""
