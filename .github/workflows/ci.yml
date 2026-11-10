@@ -22,12 +22,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dev dependencies
-        run: python -m pip install --upgrade pip build pytest
+      - name: Install package and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
       - name: Run unit tests
-        env:
-          PYTHONPATH: src
-        run: python -m pytest -q tests/test_security.py tests/test_config.py
+        run: python -m pytest -q
+      - name: Run end-to-end smoke test
+        run: python tests/smoke_test.py
       - name: Build wheel
         run: python -m build --wheel
       - name: Upload wheel artifact
@@ -36,3 +38,24 @@ jobs:
           name: openhop-mcp-wheel-${{ matrix.python-version }}
           path: dist/*.whl
           if-no-files-found: error
+
+  validate-wheel:
+    # Checks the wheel against the real Repeater plugin manifest parser.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Fetch Repeater source
+        # The manifest and storage modules are stdlib-only, so nothing else is installed.
+        run: git clone --depth 1 https://github.com/openhop-dev/openhop_repeater.git repeater-source
+      - name: Validate wheel
+        env:
+          PYTHONPATH: repeater-source
+        run: python validate_wheel.py

@@ -14,9 +14,13 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+import anyio
 import uvicorn
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
+from . import __version__
+from .api_policy import PolicyError, clean_params, normalise_path
 from .client import OpenHopClient, OpenHopError
 from .config import Config, ConfigError, load_config
 from .history import HistoryError, RepeaterHistory
@@ -31,12 +35,14 @@ packets, noise floor, GPS, hardware, logs, processes, MQTT, web frontends,
 setup metadata, or room messages as needed.
 
 Channel conversation history is NOT in the REST API. It is read directly from
-the Repeater's SQLite database and decrypted with channel keys. Those tools
-(`openhop_channels`, `openhop_channel_messages`) require the admin role and the
-`allow_message_history` setting.
+the Repeater's SQLite database and decrypted with channel keys. Both history
+tools need the `allow_message_history` setting. `openhop_channels` (names
+only) works with any token; `openhop_channel_messages` (message content)
+requires the admin role.
 
-Transport keys and other credential material are never exposed, even through
-`openhop_api_read`.
+`openhop_api_read` only reaches an allowlist of telemetry endpoints. Plugin
+settings, config backups, identity keys, transport keys and other credential
+material are never reachable through it.
 
 Mutating tools (`openhop_send_advert`, `openhop_set_mode`,
 `openhop_set_duty_cycle`, `openhop_update_duty_cycle_config`,
@@ -126,12 +132,21 @@ def build_server(cfg: Config) -> MCPServer:
         title="openHop Repeater MCP",
         description="Authenticated telemetry access for an openHop Repeater.",
         instructions=INSTRUCTIONS,
-        version="0.5.3",
+        version=__version__,
     )
     api = OpenHopClient(cfg.openhop_base_url, cfg.openhop_api_key, cfg.request_timeout_seconds)
     history: RepeaterHistory | None = None
     if cfg.allow_message_history and cfg.repeater_db_path:
         history = RepeaterHistory(cfg.repeater_db_path)
+
+    read_tool = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    write_tool = ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+    )
+    # Transmitting on the mesh reaches other nodes and is not idempotent.
+    radio_tool = ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    )
 
     def _require_admin(operation: str) -> dict[str, Any] | None:
         auth = current_auth.get()
@@ -144,7 +159,7 @@ def build_server(cfg: Config) -> MCPServer:
             }
         return None
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_stats(summary: bool = True) -> dict[str, Any]:
         """Return Repeater system statistics. summary=True trims the large payload."""
         try:
@@ -155,7 +170,7 @@ def build_server(cfg: Config) -> MCPServer:
             return {"error": "unexpected response type", "type": type(stats).__name__}
         return _trim_stats(stats) if summary else stats
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_neighbors(
         zero_hop_only: bool = False,
         limit: int = 50,
@@ -166,8 +181,15 @@ def build_server(cfg: Config) -> MCPServer:
             stats = await api.get("/api/stats")
         except OpenHopError as exc:
             return _error(exc)
+        if not isinstance(stats, dict):
+            return {"error": "unexpected response type", "type": type(stats).__name__}
         neighbors = stats.get("neighbors") or {}
-        nodes = list(neighbors.values())
+        if isinstance(neighbors, dict):
+            nodes = [n for n in neighbors.values() if isinstance(n, dict)]
+        elif isinstance(neighbors, list):
+            nodes = [n for n in neighbors if isinstance(n, dict)]
+        else:
+            nodes = []
         if zero_hop_only:
             nodes = [n for n in nodes if n.get("zero_hop")]
         reverse = True
@@ -182,7 +204,7 @@ def build_server(cfg: Config) -> MCPServer:
             "neighbors": [_trim_neighbor(n) for n in nodes[:capped]],
         }
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_recent_packets(
         limit: int = 20,
         packet_type: int | None = None,
@@ -195,6 +217,9 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
         packets = data.get("packets", data.get("recent_packets", [])) if isinstance(data, dict) else []
+        if not isinstance(packets, list):
+            packets = []
+        packets = [p for p in packets if isinstance(p, dict)]
         if packet_type is not None:
             packets = [p for p in packets if p.get("type") == packet_type]
         if route is not None:
@@ -209,14 +234,16 @@ def build_server(cfg: Config) -> MCPServer:
         # the packets table so callers get real data instead of a bare zero.
         if history is not None:
             try:
-                return history.recent_packets(
-                    limit=capped, packet_type=packet_type, route=route
+                return await anyio.to_thread.run_sync(
+                    lambda: history.recent_packets(
+                        limit=capped, packet_type=packet_type, route=route
+                    )
                 )
             except HistoryError as exc:
                 return {"count": 0, "packets": [], "source": "api", "fallback_error": str(exc)}
         return {"count": 0, "packets": [], "source": "api"}
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_packet_stats(hours: int = 24) -> dict[str, Any]:
         """Return packet counters for the last N hours."""
         try:
@@ -224,7 +251,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_packet_type_stats(hours: int = 24) -> dict[str, Any]:
         """Return packet counts grouped by packet type for the last N hours."""
         try:
@@ -232,7 +259,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_route_stats(hours: int = 24) -> dict[str, Any]:
         """Return packet counts grouped by route type for the last N hours."""
         try:
@@ -240,7 +267,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_noise_floor(hours: int = 24) -> dict[str, Any]:
         """Return noise floor statistics for the last N hours."""
         try:
@@ -248,7 +275,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_gps() -> dict[str, Any]:
         """Return GPS diagnostics and parsed NMEA attributes."""
         try:
@@ -256,7 +283,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_hardware() -> dict[str, Any]:
         """Return host hardware statistics (CPU, RAM, disk, temperatures)."""
         try:
@@ -264,7 +291,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_logs(
         limit: int = 50,
         level: str | None = None,
@@ -294,7 +321,7 @@ def build_server(cfg: Config) -> MCPServer:
         ]
         return {"count": len(entries), "returned": len(trimmed), "logs": trimmed}
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_processes(limit: int = 20, sort_by: str = "cpu") -> dict[str, Any]:
         """Return host process resource usage. sort_by is 'cpu' or 'memory'."""
         try:
@@ -318,7 +345,7 @@ def build_server(cfg: Config) -> MCPServer:
         ]
         return {"count": len(procs), "returned": len(trimmed), "processes": trimmed}
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_mqtt_status() -> dict[str, Any]:
         """Return MQTT bridge status and per-broker connection state."""
         try:
@@ -345,7 +372,7 @@ def build_server(cfg: Config) -> MCPServer:
             "brokers": trimmed,
         }
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_web_frontends() -> dict[str, Any]:
         """Return configured web frontends and which one is selected."""
         try:
@@ -372,7 +399,7 @@ def build_server(cfg: Config) -> MCPServer:
             "frontends": trimmed,
         }
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_setup_info() -> dict[str, Any]:
         """Return setup/hardware metadata: radio presets, serial ports, site info, hardware options."""
         out: dict[str, Any] = {}
@@ -388,7 +415,7 @@ def build_server(cfg: Config) -> MCPServer:
                 out[key] = _error(exc)
         return out
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_room_messages(
         room_name: str | None = None,
         room_hash: str | None = None,
@@ -410,7 +437,7 @@ def build_server(cfg: Config) -> MCPServer:
         except OpenHopError as exc:
             return _error(exc)
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_channels() -> dict[str, Any]:
         """List configured mesh channels (names and indices only — never secrets)."""
         if history is None:
@@ -419,11 +446,11 @@ def build_server(cfg: Config) -> MCPServer:
                 "hint": "set allow_message_history=true and repeater_db_path in plugin config",
             }
         try:
-            return history.channels()
+            return await anyio.to_thread.run_sync(history.channels)
         except HistoryError as exc:
             return {"error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_channel_messages(
         channel: str | None = None,
         days: float = 7.0,
@@ -435,7 +462,8 @@ def build_server(cfg: Config) -> MCPServer:
 
         Admin token required — message content is more sensitive than telemetry.
         Omit `channel` to search every configured channel. `days` is a rolling
-        window ending now. `grep` is a case-insensitive substring filter.
+        window ending now, capped at 90. `grep` is a case-insensitive substring
+        filter.
         """
         denied = _require_admin("openhop_channel_messages")
         if denied:
@@ -446,58 +474,56 @@ def build_server(cfg: Config) -> MCPServer:
                 "hint": "set allow_message_history=true and repeater_db_path in plugin config",
             }
         try:
-            return history.messages(
-                channel,
-                days=days,
-                limit=limit,
-                grep=grep,
-                include_bogus_timestamps=include_bogus_timestamps,
+            return await anyio.to_thread.run_sync(
+                lambda: history.messages(
+                    channel,
+                    days=days,
+                    limit=limit,
+                    grep=grep,
+                    include_bogus_timestamps=include_bogus_timestamps,
+                )
             )
         except HistoryError as exc:
             return {"error": str(exc)}
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_whoami() -> dict[str, Any]:
         """Return the identity and role granted to the calling token."""
         return dict(current_auth.get())
 
-    @server.tool()
+    @server.tool(annotations=read_tool)
     async def openhop_api_read(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """GET an allowlisted read-only Repeater endpoint, e.g. '/api/gps'.
+        """GET an allowlisted read-only Repeater telemetry endpoint, e.g. '/api/gps'.
 
-        Rejects non-/api/ paths, streaming endpoints, and anything that looks
-        mutating. Only GET is performed; there is no write equivalent here.
+        Only telemetry paths are allowed (stats, packets, noise floor, airtime,
+        CRC, neighbour links, rooms, MQTT status and similar). Credential,
+        config, identity, plugin and streaming endpoints are refused. Params
+        must be flat strings, numbers or booleans.
         """
-        lowered = path.lower()
-        blocked = (
-            "stream",
-            "restart",
-            "install",
-            "uninstall",
-            "delete",
-            "set_",
-            "send_",
-            "update_",
-            "backup",
-            "import",
-            # Credential material: never readable through the generic tool.
-            "transport_keys",
-            "auth_tokens",
-            "api_key",
-            "apikey",
-            "auth_token",
-        )
-        if not lowered.startswith("/api/") or "://" in lowered:
-            return {"error": "path must start with /api/ and be relative"}
-        if any(token in lowered for token in blocked):
-            return {"error": f"path rejected by read-only policy: {path}"}
         try:
-            return await api.get(path, params)
+            safe_path = normalise_path(path)
+            safe_params = clean_params(params)
+        except PolicyError as exc:
+            return {"error": "path rejected by read-only policy", "reason": str(exc)}
+        try:
+            return await api.get(safe_path, safe_params)
+        except OpenHopError as exc:
+            return _error(exc)
+
+    @server.tool(annotations=read_tool)
+    async def openhop_validate_config() -> dict[str, Any]:
+        """Validate the Repeater's current configuration. Admin token required."""
+        denied = _require_admin("openhop_validate_config")
+        if denied:
+            return denied
+        try:
+            # GET only — POST returns 405 on this route.
+            return await api.get("/api/validate_config")
         except OpenHopError as exc:
             return _error(exc)
 
     if not cfg.read_only:
-        @server.tool()
+        @server.tool(annotations=radio_tool)
         async def openhop_send_advert() -> dict[str, Any]:
             """Send an advert from the Repeater. Requires read_only=false and an admin token."""
             denied = _require_admin("openhop_send_advert")
@@ -508,7 +534,7 @@ def build_server(cfg: Config) -> MCPServer:
             except OpenHopError as exc:
                 return _error(exc)
 
-        @server.tool()
+        @server.tool(annotations=write_tool)
         async def openhop_set_mode(mode: str) -> dict[str, Any]:
             """Set Repeater mode. Requires read_only=false and an admin token."""
             denied = _require_admin("openhop_set_mode")
@@ -521,7 +547,7 @@ def build_server(cfg: Config) -> MCPServer:
             except OpenHopError as exc:
                 return _error(exc)
 
-        @server.tool()
+        @server.tool(annotations=write_tool)
         async def openhop_set_duty_cycle(enabled: bool = True) -> dict[str, Any]:
             """Enable or disable duty-cycle enforcement. Admin token required."""
             denied = _require_admin("openhop_set_duty_cycle")
@@ -532,7 +558,7 @@ def build_server(cfg: Config) -> MCPServer:
             except OpenHopError as exc:
                 return _error(exc)
 
-        @server.tool()
+        @server.tool(annotations=write_tool)
         async def openhop_update_duty_cycle_config(
             max_airtime_percent: float | None = None,
             enforcement_enabled: bool | None = None,
@@ -569,7 +595,7 @@ def build_server(cfg: Config) -> MCPServer:
             "penalty_multiplier",
         }
 
-        @server.tool()
+        @server.tool(annotations=write_tool)
         async def openhop_update_advert_rate_limit(settings: dict[str, Any]) -> dict[str, Any]:
             """Update advert rate-limiting settings. Admin token required.
 
@@ -592,19 +618,7 @@ def build_server(cfg: Config) -> MCPServer:
             except OpenHopError as exc:
                 return _error(exc)
 
-        @server.tool()
-        async def openhop_validate_config() -> dict[str, Any]:
-            """Validate the Repeater's current configuration. Admin token required."""
-            denied = _require_admin("openhop_validate_config")
-            if denied:
-                return denied
-            try:
-                # GET only — POST returns 405 on this route.
-                return await api.get("/api/validate_config")
-            except OpenHopError as exc:
-                return _error(exc)
-
-        @server.tool()
+        @server.tool(annotations=radio_tool)
         async def openhop_publish_neighbors() -> dict[str, Any]:
             """Publish the current neighbour table. Admin token required."""
             denied = _require_admin("openhop_publish_neighbors")
@@ -615,7 +629,7 @@ def build_server(cfg: Config) -> MCPServer:
             except OpenHopError as exc:
                 return _error(exc)
 
-        @server.tool()
+        @server.tool(annotations=radio_tool)
         async def openhop_query_neighbor_scopes(pubkey: str) -> dict[str, Any]:
             """Ask one zero-hop neighbour for its region scopes. Admin token required.
 

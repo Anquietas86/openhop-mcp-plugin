@@ -24,7 +24,6 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 8799
 DENY_PORT = 8800
-WRITE_PORT = 8801
 TOKEN = "smoke-test-admin-0123456789"
 READ_TOKEN = "smoke-test-reader-0123456789"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -202,7 +201,19 @@ def main() -> int:
             )
             parsed = _json_from_sse(body)
             text = json.dumps(parsed or {})
-            check("openhop_stats returns live data", status == 200 and "local_hash" in text, text[:140])
+            if os.environ.get("OPENHOP_SMOKE_LIVE"):
+                check("openhop_stats returns live data", status == 200 and "local_hash" in text,
+                      text[:140])
+            else:
+                check("openhop_stats responds (no live Repeater)", status == 200 and parsed is not None,
+                      "set OPENHOP_SMOKE_LIVE=1 to require live data")
+
+            tool_meta = {t["name"]: t for t in (_json_from_sse(
+                _request("/mcp", token=TOKEN,
+                         body={"jsonrpc": "2.0", "id": 30, "method": "tools/list", "params": {}},
+                         session_id=session_id)[2]) or {}).get("result", {}).get("tools", [])}
+            hints = (tool_meta.get("openhop_stats", {}).get("annotations") or {})
+            check("read tools carry readOnlyHint", hints.get("readOnlyHint") is True, json.dumps(hints))
 
             status, _, body = _request(
                 "/mcp", token=TOKEN,
@@ -230,6 +241,18 @@ def main() -> int:
             )
             text = json.dumps(_json_from_sse(body) or {})
             check("read token resolves to read role", '"read"' in text and '"admin"' not in text, text[:140])
+
+            for blocked in ("/api/plugins/settings", "/api/identity_export", "/api/transport%5Fkeys"):
+                status, _, body = _request(
+                    "/mcp", token=READ_TOKEN,
+                    body={"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                          "params": {"name": "openhop_api_read",
+                                     "arguments": {"path": blocked,
+                                                   "params": {"id": "openhop.mcp"}}}},
+                    session_id=reader_sid,
+                )
+                text = json.dumps(_json_from_sse(body) or {})
+                check(f"api_read refuses {blocked}", "read-only policy" in text, text[:140])
         else:
             check("read token session established", False, "no Mcp-Session-Id header")
     finally:

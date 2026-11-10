@@ -29,11 +29,15 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 GROUP_TEXT_TYPE = 5
 SECRET_CACHE_SECONDS = 60.0
+#: Longest history window a single call may scan. Every row in the window is
+#: decrypted against every channel key, so this bounds the worst case.
+MAX_HISTORY_DAYS = 90.0
 
 
 class HistoryError(RuntimeError):
@@ -44,11 +48,26 @@ def _open_ro(path: Path) -> sqlite3.Connection:
     if not path.exists():
         raise HistoryError(f"repeater database not found: {path}")
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        conn = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=5.0)
     except sqlite3.Error as exc:
         raise HistoryError(f"cannot open {path} read-only: {exc}") from exc
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def channel_hashes(secret: bytes) -> frozenset[int]:
+    """Return the possible one-byte channel hashes for ``secret``.
+
+    MeshCore hashes the 16-byte key for 128-bit channels and the full 32 bytes
+    for 256-bit ones. Stored secrets may be zero-padded to 32 bytes, so both
+    forms are accepted. This is only a cheap prefilter before the HMAC check.
+    """
+    candidates = {hashlib.sha256(secret[:16]).digest()[0]}
+    if len(secret) >= 32:
+        candidates.add(hashlib.sha256(secret[:32]).digest()[0])
+    else:
+        candidates.add(hashlib.sha256(secret).digest()[0])
+    return frozenset(candidates)
 
 
 def _decode_payload(payload_hex: str, secret: bytes) -> tuple[int, int, str] | None:
@@ -229,7 +248,7 @@ class RepeaterHistory:
         include_bogus_timestamps: bool = False,
     ) -> dict[str, Any]:
         """Return decrypted channel messages within the last ``days`` days."""
-        days = max(0.01, float(days))
+        days = min(max(0.01, float(days)), MAX_HISTORY_DAYS)
         limit = max(1, min(int(limit), 1000))
         cutoff = time.time() - (days * 86400.0)
         pattern = grep.lower() if grep else None
@@ -250,6 +269,14 @@ class RepeaterHistory:
         else:
             candidates = secrets
 
+        # Pair each key with its channel-hash byte so most packets can be
+        # skipped without computing an HMAC.
+        keyed: list[tuple[str, bytes, frozenset[int]]] = [
+            (name, blob, channel_hashes(blob))
+            for name, blobs in candidates.items()
+            for blob in blobs
+        ]
+
         conn = _open_ro(self.db_path)
         try:
             rows = conn.execute(
@@ -268,15 +295,18 @@ class RepeaterHistory:
             if not payload or len(str(payload)) < 10:
                 continue
             scanned += 1
-            for name, blobs in candidates.items():
-                decoded = None
-                for blob in blobs:
-                    try:
-                        decoded = _decode_payload(str(payload), blob)
-                    except Exception:  # pragma: no cover - defensive
-                        decoded = None
-                    if decoded:
-                        break
+            payload_hex = str(payload)
+            try:
+                hash_byte = int(payload_hex[:2], 16)
+            except ValueError:
+                continue
+            for name, blob, hashes in keyed:
+                if hash_byte not in hashes:
+                    continue
+                try:
+                    decoded = _decode_payload(payload_hex, blob)
+                except Exception:  # pragma: no cover - defensive
+                    decoded = None
                 if not decoded:
                     continue
                 device_ts, _flags, body = decoded

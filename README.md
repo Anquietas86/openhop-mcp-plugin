@@ -104,16 +104,28 @@ do this automatically).
 | `openhop_setup_info` | Radio presets, serial ports, site info, hardware options. |
 | `openhop_room_messages` | Room-server messages (not channel chat). |
 | `openhop_channels` | Channel names and indices from the Repeater DB. No secrets. |
-| `openhop_channel_messages` | *Admin-only.* Decrypted channel history from the Repeater DB. |
-| `openhop_api_read` | Constrained GET against an allowlisted `/api/` path. |
-| `openhop_send_advert` | *Write, only when `read_only=false`.* |
-| `openhop_set_mode` | *Write, only when `read_only=false`.* |
-| `openhop_set_duty_cycle` | *Write, only when `read_only=false`.* |
-| `openhop_update_duty_cycle_config` | *Write, only when `read_only=false`.* |
-| `openhop_update_advert_rate_limit` | *Write, only when `read_only=false`.* |
+| `openhop_channel_messages` | *Admin-only.* Decrypted channel history from the Repeater DB (max 90 days per call). |
+| `openhop_api_read` | GET against an explicit allowlist of telemetry `/api/` paths. |
+| `openhop_whoami` | Name and role of the calling token. |
+| `openhop_validate_config` | *Admin-only.* Validate the Repeater's `config.yaml`. |
+| `openhop_send_advert` | *Write, admin, only when `read_only=false`.* Transmits an advert. |
+| `openhop_set_mode` | *Write, admin, only when `read_only=false`.* `forward`, `monitor` or `no_tx`. |
+| `openhop_set_duty_cycle` | *Write, admin, only when `read_only=false`.* |
+| `openhop_update_duty_cycle_config` | *Write, admin, only when `read_only=false`.* |
+| `openhop_update_advert_rate_limit` | *Write, admin, only when `read_only=false`.* |
+| `openhop_publish_neighbors` | *Write, admin, only when `read_only=false`.* |
+| `openhop_query_neighbor_scopes` | *Write, admin, only when `read_only=false`.* Queries one zero-hop neighbour over the air. |
 
-`openhop_api_read` refuses credential-bearing paths such as
-`/api/transport_keys`, along with streaming and mutating routes.
+Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`,
+`idempotentHint`, `openWorldHint`) so clients can tell reads from writes.
+
+`openhop_api_read` only reaches the telemetry paths listed in
+`src/openhop_mcp/api_policy.py` (stats, packets, noise floor, airtime, CRC,
+neighbour links, rooms, MQTT status and similar). Everything else is refused,
+including plugin settings, config export, identity export, transport keys,
+auth tokens, companion data, streaming routes, and GET handlers that change
+state. Paths containing percent-escapes, dot segments or doubled slashes are
+rejected rather than decoded.
 
 ## Client configuration
 
@@ -155,7 +167,7 @@ python -m build --wheel
 Then upload it to the node and install by host path:
 
 ```bash
-curl -X POST -H "X-API-Key: *** -H "Content-Type: application/json" \
+curl -X POST -H "X-API-Key: $OPENHOP_API_KEY" -H "Content-Type: application/json" \
   -d '{"wheel_path":"/tmp/openhop_mcp_plugin-<version>-py3-none-any.whl"}' \
   http://127.0.0.1:8000/api/plugins/install
 ```
@@ -163,14 +175,14 @@ curl -X POST -H "X-API-Key: *** -H "Content-Type: application/json" \
 Enable and start:
 
 ```bash
-curl -X POST -H "X-API-Key: *** -H "Content-Type: application/json" \
+curl -X POST -H "X-API-Key: $OPENHOP_API_KEY" -H "Content-Type: application/json" \
   -d '{"id":"openhop.mcp"}' http://127.0.0.1:8000/api/plugins/enable
 ```
 
 Check logs:
 
 ```bash
-curl -H "X-API-Key: *** \
+curl -H "X-API-Key: $OPENHOP_API_KEY" \
   "http://127.0.0.1:8000/api/plugins/logs?id=openhop.mcp&tail=100"
 ```
 
@@ -181,9 +193,17 @@ process — disable then enable the plugin to load the new build.
 
 ```bash
 uv venv --python python3 .venv
-uv pip install --python .venv/bin/python build setuptools wheel
+uv pip install --python .venv/bin/python -e ".[dev]"
+.venv/bin/python -m pytest -q          # unit tests
+.venv/bin/python tests/smoke_test.py   # starts the server and checks the gate end to end
 .venv/bin/python -m build --wheel
 ```
+
+The version lives in one place, `src/openhop_mcp/__init__.py`. Bump
+`openhop-plugin.json` to match; `tests/test_version.py` fails if they drift.
+
+Set `OPENHOP_SMOKE_LIVE=1` (and `OPENHOP_BASE_URL` / `OPENHOP_TEST_API_KEY`)
+to make the smoke test require live data from a real Repeater.
 
 Validate the wheel against the real Repeater parser without starting Repeater:
 

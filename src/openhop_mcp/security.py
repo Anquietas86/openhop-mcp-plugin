@@ -204,8 +204,15 @@ class GateMiddleware:
         return match
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http":
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
             await self.app(scope, receive, send)
+            return
+        if scope_type != "http":
+            # The MCP endpoint is HTTP only. Refuse anything else (websockets)
+            # instead of passing it through unauthenticated.
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
             return
 
         client = scope.get("client") or ("", 0)

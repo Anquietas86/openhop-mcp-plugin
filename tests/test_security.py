@@ -274,3 +274,36 @@ def test_constructor_rejects_bad_throttle_settings():
         _gate(auth_failure_window_seconds=0)
     with pytest.raises(ValueError):
         _gate(auth_lockout_seconds=0)
+
+
+def test_websocket_scope_is_refused_without_reaching_app():
+    reached = []
+
+    async def app(scope, receive, send):
+        reached.append(scope)
+
+    gate = _gate()
+    gate.app = app  # type: ignore[assignment]
+    sent = []
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(gate({"type": "websocket", "path": "/mcp", "client": ("127.0.0.1", 1)}, receive, send))
+    assert not reached
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+
+
+def test_lifespan_scope_passes_through():
+    reached = []
+
+    async def app(scope, receive, send):
+        reached.append(scope["type"])
+
+    gate = _gate()
+    gate.app = app  # type: ignore[assignment]
+    asyncio.run(gate({"type": "lifespan"}, None, None))
+    assert reached == ["lifespan"]

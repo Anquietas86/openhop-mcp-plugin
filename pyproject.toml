@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhop-mcp-plugin"
-version = "0.5.3"
+dynamic = ["version"]
 description = "Authenticated MCP server exposing openHop Repeater telemetry"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["build", "pytest", "pytest-asyncio"]
+dev = ["build", "pytest"]
 
 [project.urls]
 Homepage = "https://github.com/Anquietas86/openhop-mcp-plugin"
@@ -36,9 +36,16 @@ Issues = "https://github.com/Anquietas86/openhop-mcp-plugin/issues"
 [project.scripts]
 openhop-mcp = "openhop_mcp.server:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "openhop_mcp.__version__" }
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 packages = ["openhop_mcp"]
 
 [tool.setuptools.data-files]
 "share/openhop/plugins/openhop.mcp" = ["openhop-plugin.json", "README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

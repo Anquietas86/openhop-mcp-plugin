@@ -15,7 +15,7 @@ import time
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from openhop_mcp.history import HistoryError, RepeaterHistory
+from openhop_mcp.history import MAX_HISTORY_DAYS, HistoryError, RepeaterHistory, channel_hashes
 
 SECRET = bytes(range(32))
 
@@ -28,7 +28,8 @@ def _encode(body: str, secret: bytes = SECRET, flags: int = 0, ts: int | None = 
     padded = plaintext + b"\x00" * (-len(plaintext) % 16)
     ciphertext = encryptor.update(padded) + encryptor.finalize()
     mac = hmac.new(secret, ciphertext, hashlib.sha256).digest()[:2]
-    return (b"\x00" + mac + ciphertext).hex()
+    channel_hash = bytes([hashlib.sha256(secret).digest()[0]])
+    return (channel_hash + mac + ciphertext).hex()
 
 
 def _make_db(path, packets, channels=(("Public", SECRET),)):
@@ -165,3 +166,25 @@ def test_recent_packets_filters_by_type(db_path):
 def test_recent_packets_limit_clamped(db_path):
     result = RepeaterHistory(db_path).recent_packets(limit=0)
     assert result["count"] >= 1
+
+
+def test_channel_hashes_cover_16_and_32_byte_forms():
+    short = bytes(range(16))
+    padded = short + b"\x00" * 16
+    expected = hashlib.sha256(short).digest()[0]
+    assert expected in channel_hashes(short)
+    assert expected in channel_hashes(padded)
+
+
+def test_wrong_channel_hash_byte_is_skipped(tmp_path):
+    payload = _encode("VK5ABC: hidden")
+    wrong = bytes([(int(payload[:2], 16) + 1) % 256]).hex() + payload[2:]
+    path = tmp_path / "repeater.db"
+    _make_db(path, [wrong])
+    result = RepeaterHistory(path).messages(days=1)
+    assert result["returned"] == 0
+
+
+def test_days_is_capped(db_path):
+    result = RepeaterHistory(db_path).messages(days=100000)
+    assert result["days"] == MAX_HISTORY_DAYS
