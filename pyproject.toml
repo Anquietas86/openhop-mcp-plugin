@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=2.3,<3",
-    "httpx2>=2.16",
+    "httpx2>=2.10",
     "cryptography>=42",
 ]
 
